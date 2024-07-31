@@ -38,7 +38,7 @@ PROGRESS="${VIRGIL_LOC}/test/config/progress $PROGRESS_ARGS"
 XARGS=${XARGS:=0}
 
 AENEAS_TEST=${AENEAS_TEST:=$VIRGIL_LOC/bin/v3c}
-TEST_TARGETS=${TEST_TARGETS:="v3i jvm wasm-js x86-linux x86-64-linux x86-darwin x86-64-darwin"}
+TEST_TARGETS=${TEST_TARGETS:="v3i jvm wasm x86-linux x86-64-linux x86-darwin x86-64-darwin"}
 
 if [[ ! -x "$AENEAS_TEST" && "$AENEAS_TEST" != auto ]]; then
     echo $AENEAS_TEST: not found or not executable
@@ -343,10 +343,7 @@ function execute_target_tests() {
     if [ -d "$TEST_CACHE/$SUITE/$target" ]; then
 	print_status "   cached" ""
 	ext=""
-	if [ "$target" = "wasm-js" ]; then
-	   ext=".wasm"
-	fi
-	if [ "$target" = "wasm-spec" ]; then
+	if [ "$target" = "wasm" ]; then
 	   ext=".wasm"
 	fi
 	check_cached_target_tests $ext | tee $OUT/$target/cached.out | $PROGRESS
@@ -380,9 +377,12 @@ function execute_target_tests() {
 function execute_tests() {
     for target in $TEST_TARGETS; do
 	if [ "$target" = "v3i" ]; then
-            (execute_v3i_tests "v3i" "") || exit $?
-            (execute_v3i_tests "v3i-ra" "-ra -ma=false") || exit $?
-            (execute_v3i_tests "v3i-ra-ma" "-ra -ma=true") || exit $?
+            (execute_v3i_tests "v3i" "-ssa-int=false") || exit $?
+            (execute_v3i_tests "v3i-ra" "-ssa-int=false -ra -ma=false") || exit $?
+            (execute_v3i_tests "v3i-ra-ma" "-ssa-int=false -ra -ma=true") || exit $?
+            (execute_v3i_tests "v3i" "-ssa-int=true") || exit $?
+            (execute_v3i_tests "v3i-ra" "-ssa-int=true -ra -ma=false") || exit $?
+            (execute_v3i_tests "v3i-ra-ma" "-ssa-int=true -ra -ma=true") || exit $?
 	elif [[ "$target" = "jvm" || "$target" = "jar" ]]; then
             (compile_target_tests jvm -jvm.script=false) || exit $?
             (execute_target_tests jvm) || exit $?
@@ -440,10 +440,7 @@ function get_io_targets() {
 	    jvm)
 		result="$result jar"
 		;;
-	    wasm-js)
-		result="$result wasm-wave" #TODO: wasm-linux
-		;;
-	    wasm-spec)
+	    wasm)
 		result="$result wasm-wave" #TODO: wasm-linux
 		;;
 	    *)

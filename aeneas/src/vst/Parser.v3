@@ -98,6 +98,8 @@ component Parser {
 	def parseFile(fileName: string, input: Array<byte>, ERROR: ErrorGen, typeCache: TypeCache) -> VstFile {
 		var file = VstFile.new(fileName, input);
 		var p = ParserState.new(file, ERROR, skipToNextToken, typeCache);
+		p.enableFuncExprs = CLOptions.FUNC_EXPRS.get();
+
 		file.input = input;
 		file.lineEnds = p.lineEnds;
 		// parse class, component, var, and def declarations
@@ -774,8 +776,10 @@ component Parser {
 		return MatchPattern.new(expr, params);
 	}
 	def parseMatchParam(p: ParserState) -> VarDecl {
-		var id = parseIdentVoid(p);
-		var v = VarDecl.new(id.name, null, null);
+		var token: Token;
+		if (p.curByte == '_') token = p.token(1);
+		else token = parseIdentVoid(p).name;
+		var v = VarDecl.new(token, null, null);
 		v.isReadOnly = true;
 		return v;
 	}
@@ -842,7 +846,7 @@ component Parser {
 			}
 			return parseVarExpr(p);
 		}
-		if (PARSE_FUNCEXPRS && ch == 'd') { // TODO: enable
+		if (p.enableFuncExprs && ch == 'd') {
 			var start = optKeyword(p, "def");
 			if (start != null) {
 				var id = if(Char.isIdentStart(p.curByte), parseIdentVoid(p).name);
@@ -1488,4 +1492,3 @@ class VarDefParser(isPrivate: bool, writability: Writability) {
 		return prev;
 	}
 }
-def PARSE_FUNCEXPRS = false;

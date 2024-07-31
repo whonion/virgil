@@ -85,6 +85,7 @@ class Decl(token: Token) {
 	def render(buf: StringBuilder) -> StringBuilder {
 		return buf.puts(token.image);
 	}
+	def isUnderscore() -> bool { return Strings.equal("_", token.image); } // XXX: make a boolean field?
 }
 // Parsed parameter
 class ParamDecl extends VarDecl {
@@ -391,6 +392,7 @@ class VstField extends VstMember {
 	def writability: Writability;
 	def tref: TypeRef;
 	var init: Expr;
+	var paramInit: bool;
 	var vtype: Type;
 	var initOrder: int;
 	var initEnv: MethodEnv;
@@ -976,6 +978,7 @@ type VstOperator {
 	case NotEqual;		// desugared to !(a == b)
 	case BoolAndAnd;	// desugared to if(a, b, false)
 	case BoolOrOr;		// desugared to if(a, true, b)
+	case ArrayAllocDefault; // desugared to a = ArrayFill(ArrayAlloc(len), DefaultValue<T>)
 
 	case Commute(op: Operator);	// desugared to (y op x)
 
