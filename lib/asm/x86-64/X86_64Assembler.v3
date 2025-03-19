@@ -315,6 +315,12 @@ class X86_64Assembler(w: DataWriter, OP_REX: byte) {
 	def add_r_i(a: X86_64Gpr, i: int) -> this     { emitop2_r_i(a, i, OP_REX, 0); }
 	def add_m_i(a: X86_64Addr, i: int) -> this    { emitop2_m_i(a, i, OP_REX, 0); }
 
+	def bswap_r(a: X86_64Gpr) -> this {
+		var rex = OP_REX | rex_r(a, REX_B);
+		if (rex != 0) emitb(REX_BYTE | rex);
+		emitbb(0x0F, 0xC8 + a.low3);
+	}
+
 	def btr_r_i(a: X86_64Gpr, imm: u6) -> this {
 		var rex = OP_REX | rex_r(a, REX_B);
 		if (rex != 0) emitb(REX_BYTE | rex);
@@ -1001,6 +1007,22 @@ class X86_64Assembler(w: DataWriter, OP_REX: byte) {
 	def negq_m(a: X86_64Addr) -> this {
 		emit_rex_b_m_x(a, REX_W, 0xF7, 3);
 	}
+        def negb_r(a: X86_64Gpr) -> this {
+		var rex = NO_REX;
+		if (a == X86_64Regs.RSP || a == X86_64Regs.RBP || a == X86_64Regs.RSI || a == X86_64Regs.RDI) rex = REX_BYTE;
+                emit_rex_b_r_x(a, rex, 0xF6, 3);
+        }
+        def negw_r(a: X86_64Gpr) -> this {
+                emitb(PREFIX_W);
+                emit_rex_b_r_x(a, NO_REX, 0xF7, 3);
+        }
+        def negd_r(a: X86_64Gpr) -> this {
+                emit_rex_b_r_x(a, NO_REX, 0xF7, 3);
+        }
+        def negq_r(a: X86_64Gpr) -> this {
+                emit_rex_b_r_x(a, REX_W, 0xF7, 3);
+        }
+
 	def pushq_m(a: X86_64Addr) -> this {
 		emit_rex_b_m_x(a, NO_REX, 0xFF, 6);
 	}
@@ -1573,6 +1595,12 @@ class X86_64Assembler(w: DataWriter, OP_REX: byte) {
 	}
 	def fisttpq(a: X86_64Addr) -> this {
 		emit_rex_b_m_x(a, NO_REX, 0xDD, 1);
+	}
+	def fs_prefix() -> this {
+		emitb(0x64);
+	}
+	def gs_prefix() -> this {
+		emitb(0x65);
 	}
 
 	def ucomisd_s_s(a: X86_64Xmmr, b: X86_64Xmmr) -> this {

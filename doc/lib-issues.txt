@@ -16,7 +16,6 @@ _|__| __|__ _|___|   __|__ _____| _____| |____| |_____ _____|
  int parsing
 
 -- fix naming conventions  --------
- Buffer vs Stream
  Builder
  set
  put, putx, put_x, putX
@@ -28,6 +27,7 @@ Datastructures:
   - List
   - HashMap
   - Arrays
+  - Ranges
   - BitMatrix
   - BitVector
   - Vector
@@ -43,14 +43,15 @@ Strings/render
   - Utf8
 
 Parsing
+  - Parsed<T>
   - Symbol
   - Tokens
   - Lexing utils
   - Parsing utils
+  - TextReader
+  - NumberParser
 
 IO
-  - ByteBuffer
-  - CharBuffer underlies StringBuilder?
   - ByteStream
   - DataReader
   - DataWriter
@@ -231,10 +232,10 @@ Out:					New Name (?)
 
 Input	       Create		Append	Get Peek Match Errors	EOF
 ------------------------------------------------------
-TextReader	Slice<byte>	putK
+TextReader	Range<byte>	putK
   .ok
   .reset
-DataReader	Slice<byte>	putK
+DataReader	Range<byte>	putK
   .ok
   .reset
 
@@ -248,3 +249,32 @@ DataWriter
   .length
   .grow()
   .acquire
+
+Possible directory structures and namespaces:
+------------------------------------------------------
+
+lib/util 	   	        // Data structures and arrays, extend virgil types
+use util.HashMap;
+use util.BitMatrix;
+use util.Arrays;
+use util.Ranges;
+use util.Ints;
+use util.Longs;
+use util.Bools;
+use util.Chars;
+use util.Functions;
+use util.Tuples;
+use util.Strings;
+
+lib/string			// Strings and rendering
+use string.StringBuilder;
+
+lib/parse			// Parsing utilities
+use parse.NumberParser;
+use parse.Token;
+
+lib/file			// File loading and writing utilities and layouts
+
+lib/stat			// Statistics
+
+lib/linux			// Linux system calls and layouts

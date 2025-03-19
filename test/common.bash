@@ -26,9 +26,8 @@ RT_LOC=$VIRGIL_LOC/rt
 GC_LOC=$RT_LOC/gc
 AENEAS_SOURCES=${AENEAS_SOURCES:=$(ls $VIRGIL_LOC/aeneas/src/*/*.v3)}
 AENEAS_LOC=${AENEAS_LOC:=${VIRGIL_LOC}/aeneas/src}
-NATIVE_SOURCES="$RT_LOC/native/*.v3"
-GC_SOURCES="${GC_LOC}/*.v3"
 V3C_HEAP_SIZE=${V3C_HEAP_SIZE:="-heap-size=500m"}
+TEST_GC_WASM=${TEST_GC_WASM:=1}
 
 # Progress arguments. By default the inline (i) mode is used, while the CI sets
 # it to character (c) mode
@@ -176,7 +175,9 @@ function run_io_test() {
 	return 0
     fi
 
-    local P=$T/$(basename $test)
+    R=$(basename $runner)
+    mkdir -p $T/$R/
+    local P=$T/$R/$(basename $test)
 
     infile=${test##*/}.in
     if [ -f $infile ]; then
@@ -340,6 +341,7 @@ function check_cached_target_tests() {
 function execute_target_tests() {
     target=$1
     R=$OUT/$target/run.out
+    FAIL=0
     if [ -d "$TEST_CACHE/$SUITE/$target" ]; then
 	print_status "   cached" ""
 	ext=""
@@ -362,6 +364,7 @@ function execute_target_tests() {
 	    if [ -x $runner ]; then
 		print_status "  running" "${r/test-$target/}"
 		$runner $OUT/$target $TORUN | tee $OUT/$target/run.out | $PROGRESS
+                FAIL=$(($FAIL | $?))
 		RAN=1
 	    fi
 	done
@@ -372,17 +375,15 @@ function execute_target_tests() {
 	    printf "$count ${YELLOW}no runners found${NORM}\n"
 	fi
     fi
+    return $FAIL
 }
 
 function execute_tests() {
     for target in $TEST_TARGETS; do
 	if [ "$target" = "v3i" ]; then
-            (execute_v3i_tests "v3i" "-ssa-int=false") || exit $?
-            (execute_v3i_tests "v3i-ra" "-ssa-int=false -ra -ma=false") || exit $?
-            (execute_v3i_tests "v3i-ra-ma" "-ssa-int=false -ra -ma=true") || exit $?
-            (execute_v3i_tests "v3i" "-ssa-int=true") || exit $?
-            (execute_v3i_tests "v3i-ra" "-ssa-int=true -ra -ma=false") || exit $?
-            (execute_v3i_tests "v3i-ra-ma" "-ssa-int=true -ra -ma=true") || exit $?
+            (execute_v3i_tests "v3i" "") || exit $?
+            (execute_v3i_tests "v3i-ra" "-ra -ma=false") || exit $?
+            (execute_v3i_tests "v3i-ra-ma" "-ra -ma=true") || exit $?
 	elif [[ "$target" = "jvm" || "$target" = "jar" ]]; then
             (compile_target_tests jvm -jvm.script=false) || exit $?
             (execute_target_tests jvm) || exit $?
@@ -392,19 +393,6 @@ function execute_tests() {
             (execute_target_tests $target) || exit $?
 	fi
     done
-}
-
-function set_os_sources() {
-    target=$1
-    if [ "$target" = "x86-darwin" ]; then
-	export OS_SOURCES="$RT_LOC/x86-darwin/*.v3"
-    elif [ "$target" = "x86-64-darwin" ]; then
-	export OS_SOURCES="$RT_LOC/x86-64-darwin/*.v3"
-    elif [ "$target" = "x86-linux" ]; then
-	export OS_SOURCES="$RT_LOC/x86-linux/*.v3"
-    elif [ "$target" = "x86-64-linux" ]; then
-	export OS_SOURCES="$RT_LOC/x86-64-linux/*.v3"
-    fi
 }
 
 function compile_aeneas() {
@@ -459,6 +447,12 @@ function is_gc_target() {
 	return 0
     elif [ "$target" = "x86-64-linux" ]; then
 	return 0
+    elif [[ "$target" = "wasm" && "$TEST_GC_WASM" != 0 ]]; then
+        return 0
     fi
     return 1
+}
+
+function do_nothing() {
+    return 0;
 }

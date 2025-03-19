@@ -13,16 +13,16 @@ def checkInputs(inputs: Array<SsaInstr>) {
 	for (i in inputs) if (i == null) return V3.fail("null input");
 }
 
-def NEW_OPTIMIZER = false;
 def N = Facts.NONE;
 // Support class for constructing SSA instruction-by-instruction.
-class SsaBuilder extends SsaBlockState {
+class SsaBuilder {
 	def context: SsaContext;
 	def graph: SsaGraph;
 	var block: SsaBlock;
 	var pt: SsaLink;
 	var opt: SsaOptimizer;
 	var source: Source;
+	var end: bool;
 
 	new(context, graph, block) { }
 
@@ -37,7 +37,6 @@ class SsaBuilder extends SsaBlockState {
 		var i = SsaApplyOp.new(source, op, args);
 		i.setFact(Opcodes.facts(op.opcode));
 		append(i);
-		if (NEW_OPTIMIZER && opt != null) return opt.reduceApply(this, i);
 		return i;
 	}
 	def addApplyF(op: Operator, args: Array<SsaInstr>, facts: Fact.set) -> SsaInstr {
@@ -50,7 +49,6 @@ class SsaBuilder extends SsaBlockState {
 		var i = SsaApplyOp.new(source, op, args);
 		i.setFact(Opcodes.facts(op.opcode) | facts);
 		append(i);
-		if (NEW_OPTIMIZER && opt != null) return opt.reduceApply(this, i);
 		return i;
 	}
 	def addApplyVst(source: Source, op: Operator, vst: VstOperator, args: Array<SsaInstr>) -> SsaInstr {
@@ -78,7 +76,7 @@ class SsaBuilder extends SsaBlockState {
 			IntView => return opIntView(op.typeArgs[0], IntType.!(op.typeArgs[1]), args[0]);
 			FloatSign => {
 				var ft = FloatType.!(op.typeArgs[0]);
-				return opFloatBitField(op, ft, ft.total_width - byte.!(1), 0, args[0]);
+				return opFloatBitField(op, ft, ft.width - byte.!(1), 0, args[0]);
 			}
 			FloatExponent => {
 				var ft = FloatType.!(op.typeArgs[0]);
@@ -376,7 +374,6 @@ class SsaBuilder extends SsaBlockState {
 		end = true;
 		var i = SsaIf.new(cond, tblock, fblock);
 		append(i);
-		if (NEW_OPTIMIZER && opt != null) opt.reduceIf(this, i);
 	}
 	def addSelect(t: Type, cond: SsaInstr, tval: SsaInstr, fval: SsaInstr) -> SsaInstr {
 		if (Debug.PARANOID) { checkInputs([cond, tval, fval]); }
@@ -608,11 +605,11 @@ class SsaBuilder extends SsaBlockState {
 	def opNormRangeSetElemElem(rangeType: Type, indexType: IntType, elem: int, facts: Fact.set, x: SsaInstr, y: SsaInstr, z: SsaInstr, w: SsaInstr) -> SsaInstr {
 		return add(V3Op.newNormRangeSetElemElem(rangeType, indexType, elem), [x, y, z, w], facts);
 	}
-	def opByteArrayGetField(fieldType: Type, startType: Type, offset: int, facts: Fact.set, x: SsaInstr, y: SsaInstr) -> SsaInstr {
-		return add(V3Op.newByteArrayGetField(offset, fieldType, startType), [x, y], facts);
+	def opByteArrayGetField(fieldType: Type, startType: Type, offset: int, order: ByteOrder, facts: Fact.set, x: SsaInstr, y: SsaInstr) -> SsaInstr {
+		return add(V3Op.newByteArrayGetField(offset, fieldType, order, startType), [x, y], facts);
 	}
-	def opByteArraySetField(fieldType: Type, startType: Type, offset: int, facts: Fact.set, x: SsaInstr, y: SsaInstr, z: SsaInstr) -> SsaInstr {
-		return add(V3Op.newByteArraySetField(offset, fieldType, startType), [x, y, z], facts);
+	def opByteArraySetField(fieldType: Type, startType: Type, offset: int, order: ByteOrder, facts: Fact.set, x: SsaInstr, y: SsaInstr, z: SsaInstr) -> SsaInstr {
+		return add(V3Op.newByteArraySetField(offset, fieldType, order, startType), [x, y, z], facts);
 	}
 	private def tryElimBoundsCheck(x: SsaInstr, y: SsaInstr) -> Fact.set {
 		if (SsaConst.?(y)) {
@@ -650,8 +647,11 @@ class SsaBuilder extends SsaBlockState {
 	}
 	// ClassAlloc[new](args)
 	def opClassAlloc(m: IrSpec, x: Array<SsaInstr>) -> SsaInstr {
-		if (m.member == null) return add(V3Op.newEmptyClassAlloc(m.receiver), Ssa.NO_INSTRS, Fact.V_NON_ZERO);
-		return add(V3Op.newClassAlloc(m), x, Fact.V_NON_ZERO);
+		var facts: Fact.set = Fact.V_NON_ZERO;
+		if (V3.isVariant(m.receiver)) context.fail1("class alloc of variant type %q", m.receiver.render);
+		if (m.member == null) return add(V3Op.newEmptyClassAlloc(m.receiver), Ssa.NO_INSTRS, facts);
+		recordDirectCall(m);
+		return add(V3Op.newClassAlloc(m), x, facts);
 	}
 	// (Component|Class|Variant)GetField[f](x)
 	def opGetField(f: IrSpec, x: SsaInstr) -> SsaInstr {
@@ -716,7 +716,12 @@ class SsaBuilder extends SsaBlockState {
 	def opCallVirtual(m: IrSpec, x: Array<SsaInstr>) -> SsaInstr {
 		var facts = m.member.facts & Fact.O_PURE;
 		if(x[0].facts.V_NON_ZERO) facts |= Fact.O_NO_NULL_CHECK;
-		return add(V3Op.bestCallVirtual(m), x, facts); // XXX: devirtualize based on x's type as well
+		var op = V3Op.bestCallVirtual(m);
+		match (op.opcode) {
+			CallClassMethod(m) => recordDirectCall(V3Op.extractIrSpec(op, m));
+			_ => ;
+		}
+		return add(op, x, facts); // XXX: devirtualize based on x's type as well
 	}
 	// CallClosure(args)
 	def opCallClosure(ftype: Type, x: Array<SsaInstr>) -> SsaInstr {
@@ -878,12 +883,13 @@ class SsaIfCascade {
 		fblock = null;
 	}
 	def endCase(val: SsaInstr) {
-		if (builder.end) return;
-		if (varType != null) {
-			if (val == null) builder.context.fail("SsaIfCascade variable must be non-null on this path");
-			phiInputs.put(val);
+		if (!builder.end) {
+			if (varType != null) {
+				if (val == null) builder.context.fail("SsaIfCascade variable must be non-null on this path");
+				phiInputs.put(val);
+			}
+			builder.addGoto(merge);
 		}
-		builder.addGoto(merge);
 		at(fblock);
 	}
 	private def addIf0(cond: SsaInstr, not: bool) {
@@ -891,16 +897,8 @@ class SsaIfCascade {
 		var tb = SsaBlock.new(), fb = SsaBlock.new();
 		if (not) builder.addIf(cond, fb, tb);
 		else builder.addIf(cond, tb, fb);
-		if (tb.preds.length == 0) { // true case eliminated
-			at(fb);
-			fblock = null;
-		} else if (fb.preds.length == 0) { // false case eliminated
-			at(tb);
-			fblock = null;
-		} else {
-			at(tb);
-			fblock = fb;
-		}
+		at(tb);
+		fblock = fb;
 	}
 	def finish() -> SsaInstr {
 		if (fblock != null) builder.context.fail("SsaIfCascade: ended before else clause");

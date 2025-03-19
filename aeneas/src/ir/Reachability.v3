@@ -21,7 +21,6 @@ enum RaFact {
 }
 
 def DUMP: Terminal;
-def XXX: Terminal;
 def NONE: RaFact.set;
 def countVals(facts: RaFact.set) -> int {
 	return if(facts.RF_VAL_MANY, 2, if(facts.RF_VAL_ONE, 1));
@@ -100,6 +99,7 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 		if (facts.RF_READ) DUMP.put(" read");
 		if (facts.RF_WRITTEN) DUMP.put(" written");
 		if (facts.RF_INIT) DUMP.put(" init");
+		if (facts.RF_VAL_MANY) DUMP.put(" many");
 		if (facts.RM_LIVE) DUMP.put(" live");
 		if (virtual != null) DUMP.put(" virtual");
 		if (facts.RC_LIVE) DUMP.put(" live");
@@ -318,6 +318,22 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 			ClassGetMethod(method) => getMethod(op, closureMethod(opMethod(op, method, context)));
 			CreateClosure(method) => getMethod(op, closureMethod(opMethod(op, method, context)));
 			ClassGetField(field) => if (op.useList != null) getField(makeField(op, field, context));
+			VariantAlloc => {
+				var rc = RaClass.!(makeType(mono(op.op.typeArgs[0], context)));
+				allocation(rc);
+				if (op.inputs.length == rc.fields.length) {
+					for (i < rc.orig.fields.length) {
+						var rf = makeField2(rc, rc.orig.fields[i]);
+						initField2(rf, op.inputs[i].dest);
+					}
+				} else { // tuple/arity mismatch, be conservative
+					for (f in rc.orig.fields) {
+						var rf = makeField2(rc, f);
+						rf.setFact(RaFact.RF_VAL_MANY);
+						rf.initFacts = Facts.NONE;
+					}
+				}
+			}
 			VariantGetField(field) => if (op.useList != null) getField(makeField(op, field, context));
 			VariantGetVirtual(method) => getVirtual(closureMethod(opMethod(op, method, context)));
 			VariantGetMethod(method) => getMethod(op, closureMethod(opMethod(op, method, context)));
@@ -329,8 +345,10 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 			CallClassMethod(method) => getMethod(op, opMethod(op, method, context));
 			CallClassVirtual(method) => getVirtual(opMethod(op, method, context));
 			CallVariantVirtual(method) => getVirtual(opMethod(op, method, context));
-			PtrAtObjectField(field) => if (op.useList != null) getAndSetField(makeField(op, field, context));
-			PtrAtComponentField(field) => if (op.useList != null) getAndSetField(makeField(op, field, context));
+			PtrAtObjectField(field) => if (op.useList != null) getPointerAtField(makeField(op, field, context), op, true);
+			PtrAtComponentField(field) => if (op.useList != null) getPointerAtField(makeField(op, field, context), op, true);
+			PtrAtUnboxedObjectField(specs) => if (op.useList != null) getPointerAtUnboxedField(op, specs, context);
+			PtrAtUnboxedComponentField(specs) => if (op.useList != null) getPointerAtUnboxedField(op, specs, context);
 			_ => ;
 		}
 	}
@@ -413,12 +431,46 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 			getEquality(if(rf.fieldType == null, f.fieldType, rf.fieldType), null);
 		}
 	}
-	def getAndSetField(rf: RaField) {
+	def pointedAtTypeLegal(t: Type) -> bool {
+		match (t) {
+			x: VoidType => return false;	// must come before PrimType
+			x: PrimType => return true;
+			x: ClassType => return !x.classDecl.isUnboxed();
+			x: PointerType => return true;
+			x: ArrayType => return true;
+			// x: TupleType => return true;	// add when handled
+		}
+		return false;
+	}
+	def getPointerAtField(rf: RaField, op: SsaApplyOp, checkType: bool) {
+		if (checkType) {
+			var ft = rf.fieldType;
+			if (ft == null) ft = rf.orig.fieldType;
+			if (!pointedAtTypeLegal(ft)) {
+				var ERROR = compilation.prog.ERROR;
+				var msg = Strings.format1("field must be of non-void primitive type or boxed class type (type is %q)", ft.render);
+				ERROR.addError(op.source.range, null, "TypeError", msg);
+			}
+		}
+		// Treat the field as both read and written, with unknown values
 		getField(rf);
 		rf.raFacts |= RaFact.RF_WRITTEN;
 		var none: Fact.set;
 		rf.writeFacts = none;
 		rf.setFact(RaFact.RF_VAL_MANY);
+	}
+	def getPointerAtUnboxedField(op: SsaApplyOp, specs: List<IrField>, context: IrSpec) {
+		var prevType: Type;
+		prevType = if(specs != null, mono(op.op.typeArgs[0], context));
+		for (l = specs; l != null; l = l.tail) {
+			var fld = l.head;
+			var rf = makeField3(prevType, fld, context);
+			prevType = rf.fieldType;
+			if (prevType == null) prevType = rf.orig.fieldType;
+			// check only the last type in the range, since the intermediates
+			// are not pointed at
+			getPointerAtField(rf, op, l.tail == null);
+		}
 	}
 	def setField(op: SsaApplyOp, rf: RaField) {
 		rf.raFacts |= RaFact.RF_WRITTEN;
@@ -428,7 +480,9 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 		else rf.setFact(RaFact.RF_VAL_MANY);
 	}
 	def initField(op: SsaApplyOp, rf: RaField) {
-		var val = op.input1();
+		initField2(rf, op.input1());
+	}
+	def initField2(rf: RaField, val: SsaInstr) {
 		if (SsaConst.?(val)) rf.addValue(SsaConst.!(val).val);
 		else rf.setFact(RaFact.RF_VAL_MANY);
 		if (!rf.raFacts.RF_INIT) {
@@ -466,6 +520,16 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 		if (!receiver.open()) return makeSimpleField(raType, f);
 		// make a polymorphic field
 		return makePolyField(raType, f);
+	}
+	def makeField3(rcvrType: Type, f: IrField, context: IrSpec) -> RaField {
+		var rf = f.raField;
+		if (rf != null) return rf;
+		// try to make a simple field first
+		var receiver = f.receiver;
+		if (!receiver.open()) return makeSimpleField(makeClass(receiver), f);
+		// get polymorphic receiver type from operator
+		receiver = mono(rcvrType, context);
+		return makePolyField(makeClass(receiver), f);
 	}
 	def makePolyField(raType: RaClass, f: IrField) -> RaField {
 		var rf = raType.fields[f.index];
@@ -531,9 +595,6 @@ class ReachabilityAnalyzer(compilation: Compilation) {
 				var superType = V3.getSuperType(t), parent: RaClass;
 				if (superType != null) {
 					parent = makeClass(superType);
-				} else {
-					// make the default variant record for field analysis
-					deferRecord(V3.makeDefaultVariantRecord(prog, t));
 				}
 				var rc = newRaClass(t, ic, parent);
 				rc.raFacts |= RaFact.RC_VARIANT;
@@ -598,10 +659,8 @@ class RaClass extends RaType {
 	var newIrType: Type;
 
 	var variantNorm: VariantNorm;		// non-null for flattened variants
-	var fieldRangesO: Array<(int, int)>;
-	var fieldRangesT: Array<(int, int)>;	// mapping of unnormalized field index to normalized range
 	var variantFields: Array<VariantField>;
-	var vecO: Array<Type>;
+	var origFieldTypes: Array<Type>;
 
 	new(oldType: Type, orig, parent) super(oldType) {
 		newIrType = oldType;
@@ -613,7 +672,6 @@ class RaClass extends RaType {
 	}
 	def makeField(f: IrField, fieldType: Type) -> RaField {
 		var rf = addField(RaField.new(oldType, f, fieldType));
-		if (oldType.typeCon.kind == Kind.VARIANT) rf.addValue(null); // TODO: hack for default variant value
 		return rf;
 	}
 	private def addField(rf: RaField) -> RaField {
@@ -628,6 +686,10 @@ class RaClass extends RaType {
 		if (parent == null) return false;
 		var i = rf.orig.index;
 		return i < parent.fields.length && parent.fields[i] == rf;
+	}
+	def fieldRequiresStorage(i: int) -> bool {
+		var rf = fields[i];
+		return rf != null && !rf.isConst() && rf.raFacts.RF_READ;
 	}
 	def makeMethod(m: IrMethod, spec: IrSpec) -> RaMethod {
 		if (m.index >= methods.length) methods = Arrays.grow(methods, methods.length + m.index + 1);
@@ -717,6 +779,9 @@ class RaField(receiver: Type, orig: IrField, fieldType: Type) extends RaItem {
 	def liveFields(ra: ReachabilityAnalyzer) -> Range<IrSpec> {
 		var rc = ra.getClass(receiver);
 		return normOf(rc.liveFields);
+	}
+	def getClosedType() -> Type {
+		return if(fieldType == null, orig.fieldType, fieldType);
 	}
 }
 // Information about a method, including any specialization, whether it is reusable
@@ -864,8 +929,8 @@ class VariantComparatorGen(context: SsaContext, root: IrClass, receiver: IrClass
 }
 // Globally shareable normalizers.
 component IntNormalizers {
-	def I32LE = IntNormalizer.new(32, false);
-	def I64LE = IntNormalizer.new(64, false);
+	def I32LE = IntNormalizer.new(32);
+	def I64LE = IntNormalizer.new(64);
 }
 // Reports code that is neither used during initialization nor reachable from main().
 class DeadCodeAnalyzer(ra: ReachabilityAnalyzer) {
@@ -936,9 +1001,9 @@ class DeadCodeAnalyzer(ra: ReachabilityAnalyzer) {
 		for (f in ic.fields) {
 			if (f.facts.X_LIVE) markMember(f);
 		}
-		for (m in ic.methods) {
-			if (m != null && m.ic != null) markMember(m);
-		}
+//TODO		for (m in ic.methods) {
+//			if (m != null && m.ssa != null) markMember(m);
+//		}
 	}
 	def processType(t: Type, tn: RaType) {
 		if (!RaClass.?(tn)) return;

@@ -11,6 +11,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 	def env = VarEnvironment.new();
 	def ir = prog.ir = IrModule.new();
 	var exportMap: PartialMap<string, ExportDecl>;
+	var methodOverrideChecks: List<(VstCompoundVerifier, VstMethod)>;
 
 	def forAll<T>(vec: Vector<T>, do: T -> void) {
 		for (i < vec.length) {
@@ -32,6 +33,12 @@ class Verifier(compiler: Compiler, prog: Program) {
 		forAll<VstClass>(vst.classes, typeCheckVstCompound);
 		forAll<VstEnum>(vst.enums, typeCheckVstCompound);
 		forAll<VstLayout>(vst.layouts, typeCheckVstCompound);
+
+		// Method override checks are deferred until after body inference.
+		for (l = methodOverrideChecks; l != null; l = l.tail) {
+			var h = l.head;
+			h.0.checkMethodOverride(h.1);
+		}
 
 		typeCache = null; // typeCache for type vars is now dead
 		if (ERROR.noErrors) {
@@ -191,15 +198,18 @@ class Verifier(compiler: Compiler, prog: Program) {
 		if (size < 0) cv.errAtExpr(decl.size).set("LayoutDeclError", Strings.format1("invalid layout size %q", decl.size.token.image));
 		decl.byteSize = size;
 		cv.verify();
-		verifyFieldOverlapping(decl);
-		checkLayoutCycle(decl);
-	}
-	def verifyFieldOverlapping(decl: VstLayout) {
-		var cv = decl.verifier;
+		// check for overlapping fields and propagate big-endian hint from decl to fields
 		var fields = Vector<VstLayoutField>.new();
+		var bigEndian = false;
+		for (l = decl.repHints; l != null; l = l.tail) {
+			if (VstRepHint.BigEndian.?(l.head)) bigEndian = true;
+		}
 		for (l = decl.members; l != null; l = l.tail) {
 			match (l.head) {
-				x: VstLayoutField => if (x.byteOffset >= 0 && x.mtref.byteSize >= 0) fields.put(x);
+				x: VstLayoutField => {
+					if (x.byteOffset >= 0 && x.mtref.byteSize >= 0) fields.put(x);
+					if (bigEndian) x.order = ByteOrder.BIG_ENDIAN;
+				}
 			}
 		}
 		var length = fields.length;
@@ -208,6 +218,7 @@ class Verifier(compiler: Compiler, prog: Program) {
 			var f = a[i], g = a[i + 1];
 			if ((f.byteOffset + f.mtref.byteSize) > g.byteOffset) cv.errAtDecl(f).FieldDeclError(Strings.format2("field %q overlaps field %q", f.render, g.render));
 		}
+		checkLayoutCycle(decl);
 	}
 	def compareFieldOffset(a: VstLayoutField, b: VstLayoutField) -> bool {
 		return a.byteOffset < b.byteOffset;
@@ -649,9 +660,21 @@ class VstCompoundVerifier {
 			_ => ;
 		}
 		var binding = lookupSuperMember(decl.name());
-		if (binding != null) return checkMethodOverride(decl, binding);
-		decl.root = decl;
-		decl.index = compound.numMethods++;
+		if (binding == null) {
+			decl.root = decl;
+			decl.index = compound.numMethods++;
+			return;
+		}
+		if (!VstMethod.?(binding.member)) {
+			errAtDecl(decl).InheritanceError("cannot override non-method member");
+			decl.root = decl;
+			return;
+		} else {
+			var superDecl = VstMethod.!(binding.member);
+			decl.index = superDecl.index;
+			decl.root = superDecl.root;
+			verifier.methodOverrideChecks = List.new((this, decl), verifier.methodOverrideChecks);
+		}
 	}
 	def checkLayoutField(decl: VstLayoutField) {
 		if (isImport) errAtDecl(decl).ImportError("imported layouts cannot contain field declarations");
@@ -669,12 +692,15 @@ class VstCompoundVerifier {
 			var tref = NamedTypeRef.new(null, decl.mtref.tname.name, null);
 			var t = decl.mtref.mttype = resolveType(tref, compound.typeEnv);
 			if (t != null) match (t) {
-				x: IntType => scale = x.packedByteSize();
-				x: FloatType => scale = x.byteSize();
-				x: EnumType => scale = x.packedByteSize();
+				x: IntType => scale = x.packedByteSize;
+				x: FloatType => scale = x.byteSize;
+				x: EnumType => scale = x.packedByteSize;
 				x: BoolType => scale = 1;
 				_ => errAtToken(decl.mtref.tname.name).FieldDeclError(Strings.format1("expected primitive layout field type, found \"%q\"", t.render));
 			}
+		}
+		for (l = decl.repHints; l != null; l = l.tail) {
+			if (VstRepHint.BigEndian.?(l.head)) decl.order = ByteOrder.BIG_ENDIAN;
 		}
 		mtref.scale = scale;
 		var size64 = mtref.repeatCount * long.view(scale);
@@ -705,40 +731,34 @@ class VstCompoundVerifier {
 		}
 		return null;
 	}
-	def checkMethodOverride(decl: VstMethod, binding: ResolvedMember) {
-		if (VstMethod.?(binding.member)) {
-			var superDecl = VstMethod.!(binding.member);
-			var superMethodType = binding.memberType;
-			var methodType = decl.getType();
-			decl.index = superDecl.index;
-			decl.root = superDecl.root;
-			if (superDecl.typeEnv != null) {
-				// substitute super method's type parameters with overriden method's
-				if (decl.typeEnv == null || decl.typeEnv.paramArray.length != superDecl.typeEnv.paramArray.length) {
-					return errAtDecl(decl).InheritanceError("cannot override method type parameters");
-				}
-				var typeArgs = TypeArgs.new(superDecl.typeEnv, decl.typeEnv.paramArray);
-				superMethodType = superMethodType.substitute(typeArgs);
-				// the overriden method's complete type must be subtype of the super
-				// use the same vtable index as the parent.
-			} else if (decl.typeEnv != null) {
+	def checkMethodOverride(decl: VstMethod) {
+		var binding = lookupSuperMember(decl.name()); // re-resolve member after return type inference
+		var superDecl = VstMethod.!(binding.member);
+		var superMethodType = binding.memberType;
+		var methodType = decl.getType();
+		if (superDecl.typeEnv != null) {
+			// substitute super method's type parameters with overriden method's
+			if (decl.typeEnv == null || decl.typeEnv.paramArray.length != superDecl.typeEnv.paramArray.length) {
 				return errAtDecl(decl).InheritanceError("cannot override method type parameters");
 			}
-			if (superDecl.returnThis) {
-				if (!decl.returnThis) return errAtDecl(decl).InheritanceError("super method returns this");
-			} else {
-				if (decl.returnThis) return errAtDecl(decl).InheritanceError("super method does not return this");
-			}
-			if (false && !superDecl.isPrivate && decl.isPrivate) { // TODO
-				return errAtDecl(decl).InheritanceError("cannot override super method with private method");
-			}
-
-			if (!TypeSystem.isSubtype(methodType, superMethodType)) {
-				errAtDecl(decl).InheritanceError2("method signature %s cannot override %s", methodType, superMethodType);
-			}
+			var typeArgs = TypeArgs.new(superDecl.typeEnv, decl.typeEnv.paramArray);
+			superMethodType = if(superMethodType != null, superMethodType.substitute(typeArgs));
+			// the overriden method's complete type must be subtype of the super
+			// use the same vtable index as the parent.
+		} else if (decl.typeEnv != null) {
+			return errAtDecl(decl).InheritanceError("cannot override method type parameters");
+		}
+		if (superDecl.returnThis) {
+			if (!decl.returnThis) return errAtDecl(decl).InheritanceError("super method returns this");
 		} else {
-			errAtDecl(decl).InheritanceError("cannot override non-method member");
-			decl.root = decl;
+			if (decl.returnThis) return errAtDecl(decl).InheritanceError("super method does not return this");
+		}
+		if (false && !superDecl.isPrivate && decl.isPrivate) { // TODO
+			return errAtDecl(decl).InheritanceError("cannot override super method with private method");
+		}
+
+		if (!TypeSystem.isSubtype(methodType, superMethodType)) {
+			errAtDecl(decl).InheritanceError2("method signature %s cannot override %s", methodType, superMethodType);
 		}
 	}
 	def checkParam(param: ParamDecl, map: Map<string, Decl>) {
@@ -856,7 +876,10 @@ class VstCompoundVerifier {
 		return tref.binding = getErrorType();
 	}
 	def getEnumSetType(tref: TypeRef, enumType: EnumType) -> Type {
-		if (enumType.setType == null) errAtRange(tref.range()).EnumSetTooLarge(enumType, tref, enumType.enumDecl.cases.length);
+		if (enumType.setType == null) {
+			errAtRange(tref.range()).EnumSetTooLarge(enumType, tref, enumType.enumDecl.cases.length);
+			return getErrorType();
+		}
 		return tref.binding = enumType.setType;
 	}
 	def newThisParam() -> ParamDecl {
@@ -1344,7 +1367,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 		return if(outer == null, getErrorType(), outer);
 	}
 	def visitAutoExpr(expr: AutoExpr, outer: Type) -> Type {
-		var t = checkWrite(expr.expr);
+		var t = checkWrite(expr.expr, expr.token);
 		if (IndexExpr.?(expr.expr)) t = checkIndexedRead(IndexExpr.!(expr.expr), outer);
 		var op = expr.op;
 		if (op == null) op = methodEnv.lookupInfix(expr.infix, t, t);
@@ -1418,7 +1441,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 				}
 				Type(t) => {
 					etype = t; inType = true;
-					binding = methodEnv.lookupTypeMember(expr, etype);
+					binding = if(etype != null, methodEnv.lookupTypeMember(expr, etype));
 				}
 				VariantCase(receiver, vcase) => {
 					etype = V3.getSyntheticVariantType(receiver, vcase);
@@ -1525,12 +1548,14 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 					expr.appbind = AppBinding.Apply(comp, facts);
 				}
 				VariantCase(receiver, member) => {
+					var ftype = elim(funcType);
 					if (member.decl.params != null) {
 						var variant = V3.getSyntheticVariantType(receiver, member);
 						expr.target = null;
-						expr.appbind = AppBinding.ClassNew(variant, member.decl.constructor);
+						var op = V3Op.newVariantAlloc(variant, Function.getParamTypeArray(ftype));
+						expr.appbind = AppBinding.Apply(op, Fact.O_PURE | Fact.O_FOLDABLE);
 					} else {
-						expr.appbind = AppBinding.CallClosure(elim(funcType));
+						expr.appbind = AppBinding.CallClosure(ftype);
 					}
 				}
 				_ => {
@@ -1541,6 +1566,51 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 
 		expr.func.exactType = elim(funcType);
 		return elim(resultType);
+	}
+	// Tries to create Vst that creates a Pointer to an unboxed subfield of a (boxed)
+	// class or component.  The operator's target is the boxed class instance (null
+	// for a component) and the operator itself includes a list of fields, the path
+	// to the subfield to which the pointer should refer.  The subfield must not
+	// itself be an unboxed variant or a tuple, i.e., it needs to be a scalar or a
+	// reference.
+	def getPtrAtUnboxedField(ve: VarExpr, rest: List<(Type, VstField)>) -> (Expr, List<(Type, VstField)>, VarBinding) {
+		var x = ve.varbind;
+		match (x) {
+			ComponentField(member) => {
+				member.pointedAt = true;
+				return (null, List<(Type, VstField)>.new((null, member), rest), x);
+			}
+			ObjectField(receiver, member) => {
+				member.pointedAt = true;
+				return (ve.receiver, List<(Type, VstField)>.new((receiver, member), rest), x);
+			}
+			VariantField(receiver, member) => {
+				// check that the type is unboxed and not packed and the ve receiver is a VarExpr or IndexExpr
+				if (!ClassType.?(receiver)) {
+					errAtExpr(ve).PtrAtFieldError();
+					return (null, null, x);
+				} else if (!ClassType.!(receiver).classDecl.isUnboxed() ||
+					   ClassType.!(receiver).classDecl.isPacked()) {
+					errAtExpr(ve).PtrAtUnboxedFieldError("operator \"Pointer.atField\" must be applied to a fully unboxed and not packed variant");
+					return (null, null, x);
+				} else if (VarExpr.?(ve.receiver)) {
+					member.pointedAt = true;
+					return getPtrAtUnboxedField(VarExpr.!(ve.receiver), List<(Type, VstField)>.new((receiver, member), rest));
+				} else if (IndexExpr.?(ve.receiver) && false) {
+					// need to convert to something like Pointer.atElem on the array/range, and do Pointer.atField on that ...
+					// maybe a new operator, PtrAtUnboxedElemField?
+					member.pointedAt = true;
+					return (ve.receiver, List<(Type, VstField)>.new((receiver, member), rest), x);
+				} else {
+					errAtExpr(ve).PtrAtUnboxedFieldError("operator \"Pointer.atField\" must be applied to a receiver.field form");
+					return (null, null, x);
+				}
+			}
+			_ => {
+				errAtExpr(ve).PtrAtFieldError();
+				return (null, null, x);
+			}
+		}
 	}
 	def visitPtrAtField(expr: AppExpr, ptrType: Type, outer: Type) -> Type {
 		if (expr.args.exprs.length() != 1) {
@@ -1553,12 +1623,14 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 			x: VarExpr => match (x.varbind) {
 				ComponentField(member) => {
 					var receiver = member.receiver.getDeclaredType();
+					member.pointedAt = true;
 					expr.appbind = AppBinding.PtrAtComponentField(receiver, member, ptrType);
 					expr.args = TupleExpr.new(VstList.new(expr.args.range(), null));
 					expr.target = null;
 					return expr.exactType = ptrType;
 				}
 				ObjectField(receiver, member) => {
+					member.pointedAt = true;
 					expr.appbind = AppBinding.PtrAtObjectField(receiver, member, ptrType);
 					expr.args = TupleExpr.new(VstList.new(expr.args.range(), null));
 					expr.target = x.receiver;
@@ -1568,6 +1640,22 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 					expr.appbind = AppBinding.PtrAtRefLayoutField(receiver, member, ptrType);
 					expr.args = TupleExpr.new(VstList.new(expr.args.range(), null));
 					expr.target = x.receiver;
+					return expr.exactType = ptrType;
+				}
+				VariantField(receiver, member) => {
+					member.pointedAt = true;
+					var ubinfo = getPtrAtUnboxedField(x, null);
+					var rcvr = ubinfo.0;
+					var fields = ubinfo.1;
+					match (ubinfo.2) {
+						ObjectField =>
+							expr.appbind = AppBinding.PtrAtUnboxedObjectField(receiver, fields, ptrType);
+						ComponentField =>
+							expr.appbind = AppBinding.PtrAtUnboxedComponentField(receiver, fields, ptrType);
+						_ => ;
+					}
+					expr.args = TupleExpr.new(VstList.new(expr.args.range(), null));
+					expr.target = rcvr;
 					return expr.exactType = ptrType;
 				}
 				_ => {
@@ -1628,7 +1716,8 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 						var mtref = member.mtref;
 						expr.receiver = x.expr;
 						expr.read = AppBinding.Apply(V3Op.newRefLayoutGetRepeatedField(
-							receiver, member.byteOffset, mtref.scale, mtref.repeatCount, mtref.getType()),
+							receiver, member.byteOffset, mtref.scale, mtref.repeatCount, mtref.getType(),
+							member.order),
 							Facts.NONE);
 						visitRepeatedIndex(expr.exprs);
 						return mtref.getType();
@@ -1651,7 +1740,8 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 				if (member != null) {
 					var funcType = member.memberType;
 					expr.read = AppBinding.CallObjectMethod(member.receiver, member.getMethod(), null);
-					typeCheckArgs("indexing", expr.exprs, funcType, outer);
+					// TODO: handle partial applications
+					var partialParamTypes =	typeCheckArgs("indexing", expr.exprs, funcType, outer);
 					return Function.getReturnType(funcType);
 				}
 			}
@@ -1659,7 +1749,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 		errAtRange(expr.exprs.range()).set("TypeError", Strings.format1("type %s has no [] operator", TYPE(exprType)));
 		return getErrorType();
 	}
-	def checkIndexedWrite(expr: IndexExpr, outer: Type) -> Type {
+	def checkIndexedWrite(expr: IndexExpr, outer: Type, pt: FilePoint) -> Type {
 		var arrayType = if(outer != null, V3Array.newType(outer)); // try using array type for outer
 		var exprType: Type;
 		match (expr.expr) {
@@ -1670,7 +1760,8 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 						var mtref = member.mtref;
 						expr.receiver = x.expr;
 						expr.write = AppBinding.Apply(V3Op.newRefLayoutSetRepeatedField(
-							receiver, member.byteOffset, mtref.scale, mtref.repeatCount, mtref.getType()),
+							receiver, member.byteOffset, mtref.scale, mtref.repeatCount, mtref.getType(),
+							member.order),
 							Facts.NONE);
 						visitRepeatedIndex(expr.exprs);
 						return mtref.getType();
@@ -1685,8 +1776,14 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 			}
 		}
 		match (exprType) {
-			x: ArrayType => return visitArrayIndex(expr, x);
-			x: RangeType => return visitArrayIndex(expr, x);
+			x: ArrayType => {
+				if (!x.writeable) errAtPoint(pt).set("AssignError", Strings.format1("illegal assignment to read-only %s element", TYPE(x)));
+				return visitArrayIndex(expr, x);
+			}
+			x: RangeType => {
+				if (!x.writeable) errAtPoint(pt).set("AssignError", Strings.format1("illegal assignment to read-only %s element", TYPE(x)));
+				return visitArrayIndex(expr, x);
+			}
 			x: ClassType => {
 				var varExpr = VarExpr.new(expr, null, VstIdent<TypeRef>.new(null, 0, null));
 				var member = methodEnv.resolveClassMember(varExpr, x, "[]=");
@@ -1801,7 +1898,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 		}
 		return t;
 	}
-	def checkWrite(left: Expr) -> Type {
+	def checkWrite(left: Expr, pt: FilePoint) -> Type {
 		var result: Type;
 		match (left) {
 			x: VarExpr => {
@@ -1817,7 +1914,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 				}
 			}
 			x: IndexExpr => {
-				result = checkIndexedWrite(x, null);
+				result = checkIndexedWrite(x, null, pt);
 				left.exactType = result;
 				return result;
 			}
@@ -1830,8 +1927,8 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 	}
 	def visitAssign(expr: AssignExpr, outer: Type) -> Type {
 		var left = expr.target;
-		var ltype = checkWrite(left);
 		var infix = expr.infix;
+		var ltype = checkWrite(left, expr.assign);
 		if (infix != null) {
 			if (IndexExpr.?(left)) ltype = checkIndexedRead(IndexExpr.!(left), outer);
 			if (infix.op == null) infix.op = methodEnv.lookupInfix(infix.infix, ltype, null);
@@ -1902,7 +1999,7 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 			return atype;
 		}
 	}
-	def visitFuncExpr(expr: FuncExpr, outer: Type) -> Type {
+	def visitFunExpr(expr: FunExpr, outer: Type) -> Type {
 		var pl: List<Type>;
 		if (FuncType.?(outer)) {
 			var el = Function.getParamTypeList(outer);
@@ -1930,25 +2027,25 @@ class TypeChecker(ERROR: ErrorGen, file: VstFile) extends VstVisitor<Type, Type>
 		var rt: Type;
 		match (expr.rettype) {
 			Void => {
-				rt = typeCheckFuncExprBody(expr.body, Void.TYPE);
+				rt = typeCheckFunExprBody(expr.body, Void.TYPE);
 			}
 			This => {
-				rt = typeCheckFuncExprBody(expr.body, methodEnv.compound.getDeclaredType());
+				rt = typeCheckFunExprBody(expr.body, methodEnv.compound.getDeclaredType());
 			}
 			Implicit(expr) => {
 				var expected = if(FuncType.?(outer), Function.getReturnType(outer));
-				rt = inferFuncExprBodyType(expr, expected);
+				rt = inferFunExprBodyType(expr, expected);
 			}
 			Explicit(tref) => {
-				rt = typeCheckFuncExprBody(expr.body, methodEnv.resolveType(tref));
+				rt = typeCheckFunExprBody(expr.body, methodEnv.resolveType(tref));
 			}
 		}
 		return expr.exactType = Function.newType(Tuple.newType(Lists.reverse(pl)), rt);
 	}
-	def inferFuncExprBodyType(expr: Expr, expected: Type) -> Type {  // TODO
+	def inferFunExprBodyType(expr: Expr, expected: Type) -> Type {  // TODO
 		return if(expected == null, getErrorType(), expected);
 	}
-	def typeCheckFuncExprBody(stmt: Stmt, expected: Type) -> Type { // TODO
+	def typeCheckFunExprBody(stmt: Stmt, expected: Type) -> Type { // TODO
 		return expected;
 	}
 	def typeCheckExpr(expr: Expr, outerType: Type, op: string) {

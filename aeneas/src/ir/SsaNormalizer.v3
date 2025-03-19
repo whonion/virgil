@@ -26,6 +26,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 //TODO		SsaGraphVerifier.new(context).verify();
 		if (context.compiler.NormOptimize) {
 			var opt = SsaOptimizer.new(context);
+			opt.iopt.optimize_loads = context.compiler.LoadOptimize;
 			opt.optGraph();
 			context.printSsa("Norm Optimized");
 //TODO			SsaGraphVerifier.new(context).verify();
@@ -221,6 +222,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 				if (t != null) return map1(i_old, t);
 				else normDefault(i_old, op);
 			}
+			VariantAlloc =>			normVariantAlloc(i_old, op);
 			VariantGetField(field) =>	normGetField(true, i_old, field, op);
 			VariantGetMethod(method) => {
 				var obj = genRef1(args[0]);
@@ -386,7 +388,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 					curBlock.opIntAdd(start, newGraph.intConst(offset)));
 				return mapN(i_old, ai_new);
 			}
-			RefLayoutGetField(offset) => {
+			RefLayoutGetField(offset, order) => {
 				var an = arrayByteNorm;
 				var fn = normTypeArg(op, 1);
 				var ai_new = genRefs(i_old.inputs);
@@ -395,12 +397,12 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var result: SsaInstr;
 
 				match (fn.oldType) {
-					x: IntType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, facts, array, start);
-					x: FloatType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, facts, array, start);
+					x: IntType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, order, facts, array, start);
+					x: FloatType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, order, facts, array, start);
 					x: EnumType => {
 						var it = IntType.!(x.enumDecl.tagType);
-						var wt = Int.getType(false, it.byteSize() * 8);
-						result = curBlock.opByteArrayGetField(wt, rangeStartType, offset, facts, array, start);
+						var wt = Int.getType(false, it.byteSize * 8);
+						result = curBlock.opByteArrayGetField(wt, rangeStartType, offset, order, facts, array, start);
 						var caseCount = newGraph.intConst(x.enumDecl.cases.length);
 						var inBound = curBlock.opIntULt(norm.config.ArrayLengthType, it, result, caseCount);
 						result = curBlock.opIntViewI0(it, wt, result);
@@ -410,7 +412,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 				}
 				return map1(i_old, result);
 			}
-			RefLayoutSetField(offset) => {
+			RefLayoutSetField(offset, order) => {
 				var fn = normTypeArg(op, 1);
 				var ai_new = genRefs(args);
 				var array = ai_new[0], start = ai_new[1], val = ai_new[2];
@@ -418,17 +420,17 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var result: SsaInstr;
 
 				match (fn.oldType) {
-					x: IntType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, facts, array, start, val);
-					x: FloatType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, facts, array, start, val);
+					x: IntType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, order, facts, array, start, val);
+					x: FloatType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, order, facts, array, start, val);
 					x: EnumType => {
 						var it = IntType.!(x.enumDecl.tagType);
-						var wt = Int.getType(false, it.byteSize() * 8);
-						result = curBlock.opByteArraySetField(wt, rangeStartType, offset, facts, array, start, val);
+						var wt = Int.getType(false, it.byteSize * 8);
+						result = curBlock.opByteArraySetField(wt, rangeStartType, offset, order, facts, array, start, val);
 					}
 				}
 				return map1(i_old, result);
 			}
-			RefLayoutGetRepeatedField(offset, scale, max) => {
+			RefLayoutGetRepeatedField(offset, scale, max, order) => {
 				var rn = normTypeArg(op, 0), fn = normTypeArg(op, 1);
 				var ai_new = genRefs(args);
 				var array = ai_new[0], start = ai_new[1], index = ai_new[2];
@@ -444,11 +446,11 @@ class SsaRaNormalizer extends SsaRebuilder {
 				);
 				var facts: Fact.set = Fact.O_NO_BOUNDS_CHECK;
 				match (fn.oldType) {
-					x: IntType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, facts, array, start);
-					x: FloatType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, facts, array, start);
+					x: IntType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, order, facts, array, start);
+					x: FloatType => result = curBlock.opByteArrayGetField(x, rangeStartType, offset, order, facts, array, start);
 					x: EnumType => {
 						var it = IntType.!(x.enumDecl.tagType);
-						result = curBlock.opByteArrayGetField(it, rangeStartType, offset, facts, array, start);
+						result = curBlock.opByteArrayGetField(it, rangeStartType, offset, order, facts, array, start);
 						var caseCount = newGraph.intConst(x.enumDecl.cases.length);
 						var inBound = curBlock.opIntULt(it, it, result, caseCount);
 						result = curBlock.addSelect(it, inBound, result, newGraph.nullConst(it));
@@ -457,7 +459,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 				}
 				return map1(i_old, result);
 			}
-			RefLayoutSetRepeatedField(offset, scale, max) => {
+			RefLayoutSetRepeatedField(offset, scale, max, order) => {
 				var rn = normTypeArg(op, 0), fn = normTypeArg(op, 1);
 				var ai_new = genRefs(args);
 				var array = ai_new[0], start = ai_new[1], index = ai_new[2], val = ai_new[3];
@@ -473,11 +475,11 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var facts: Fact.set = Fact.O_NO_BOUNDS_CHECK;
 				var result: SsaInstr;
 				match (fn.oldType) {
-					x: IntType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, facts, array, start, val);
-					x: FloatType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, facts, array, start, val);
+					x: IntType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, order, facts, array, start, val);
+					x: FloatType => result = curBlock.opByteArraySetField(fn.oldType, rangeStartType, offset, order, facts, array, start, val);
 					x: EnumType => {
 						var it = IntType.!(x.enumDecl.tagType);
-						result = curBlock.opByteArraySetField(it, rangeStartType, offset, facts, array, start, val);
+						result = curBlock.opByteArraySetField(it, rangeStartType, offset, order, facts, array, start, val);
 					}
 				}
 				return map1(i_old, result);
@@ -500,7 +502,6 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var narr = ai_new[0], start = ai_new[rn.startIndex()],
 					length = ai_new[rn.lengthIndex()], index = ai_new[rn.lengthIndex() + 1];
 				var arrayType = ArrayType.!(rn.sub[0]), ptrType = op.sig.returnType();
-				addNullCheck(i_old, narr);
 				if (context.compiler.boundsCheck(i_old.facts)) {
 					var c1 = curBlock.opU32LtEq(length, index);
 					curBlock.opConditionalThrow(V3Exception.BoundsCheck, c1);
@@ -514,6 +515,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 					var nstart = rangeStartAdd(start, index);
 					var op = V3Op.newPtrAtArrayElem(arrayType, norm.config.RangeStartType, ptrType);
 					i_new = curBlock.addApply(curBlock.source, op, [narr, nstart]);
+					i_new.facts |= Fact.O_NO_NULL_CHECK;
 				}
 				i_new.facts |= Fact.O_NO_BOUNDS_CHECK;
 				map1(i_old, i_new);
@@ -533,6 +535,13 @@ class SsaRaNormalizer extends SsaRebuilder {
 				var receiver = genRef1(i_old.inputs[0]);
 				var raField = extractFieldRef(i_old, field);
 				var nf = raField.liveFields(norm.ra);
+				if (nf.length == 0) {
+					// can happen because of user's code, so not a compiler failure;
+					// checked in Reachability
+					var result = SsaInstr.!(newGraph.intConst(0));
+					return map1(i_old, result);
+				}
+				var ft = nf[0].asField().fieldType;
 				var i_new = curBlock.addApply(curBlock.source,
 					V3Op.newPtrAtObjectField(nf[0], i_old.op.sig.returnType()), [receiver]);
 				map1(i_old, i_new);
@@ -540,6 +549,13 @@ class SsaRaNormalizer extends SsaRebuilder {
 			PtrAtComponentField(field) => {
 				var raField = extractFieldRef(i_old, field);
 				var nf = raField.liveFields(norm.ra);
+				if (nf.length == 0) {
+					// can happen because of user's code, so not a compiler failure;
+					// checked in Reachability
+					var result = SsaInstr.!(newGraph.intConst(0));
+					return map1(i_old, result);
+				}
+				var ft = nf[0].asField().fieldType;
 				var i_new = curBlock.addApply(curBlock.source,
 					V3Op.newPtrAtComponentField(nf[0], i_old.op.sig.returnType()), Ssa.NO_INSTRS);
 				map1(i_old, i_new);
@@ -558,6 +574,12 @@ class SsaRaNormalizer extends SsaRebuilder {
 					normDefault(i_old, op);
 				}
 			}
+			PtrAtUnboxedObjectField(specs) => {
+				normPtrAtUnboxedField(i_old, specs, op, BoxKind.OBJECT);
+			}
+			PtrAtUnboxedComponentField(specs) => {
+				normPtrAtUnboxedField(i_old, specs, op, BoxKind.COMPONENT);
+			}
 			SystemCall(syscall) => {
 				// normalize a syscall operator
 				var ptn = normType(Tuple.fromTypeArray(op.sig.paramTypes));
@@ -572,38 +594,6 @@ class SsaRaNormalizer extends SsaRebuilder {
 			_ => {
 				normDefault(i_old, op);
 			}
-		}
-	}
-	def genArrayByteGetMultiple(i_old: SsaApplyOp, it: IntType, array: SsaInstr, i_offset: SsaInstr, offset: int) -> SsaInstr {
-		// TODO: little-endian only for now
-		curBlock.at(i_old.source);
-		var facts: Fact.set = Fact.O_NO_BOUNDS_CHECK;
-		var size = it.packedByteSize();
-		var wt = Int.getType(false, it.byteSize() * 8); // rounded to next power of two for efficient shifting
-		var result: SsaInstr = newGraph.nullConst(wt);
-		var indexType = norm.config.RangeStartType;
-		for (i < size) {
-			var read = curBlock.opArrayGetElem(V3.arrayByteType, indexType, facts,
-				array, curBlock.opIntAdd(newGraph.intConst(i + offset), i_offset));
-			read = curBlock.opIntViewI0(Byte.TYPE, wt, read);
-			var shifted = if(i == 0, read, curBlock.addApplyF(wt.opShl(), [read, newGraph.intConst(8 * i)], Facts.O_SAFE_SHIFT));
-			result = curBlock.addApplyF(wt.opOr(), [result, shifted], Fact.O_PURE);
-			facts |= Fact.O_NO_NULL_CHECK;
-		}
-		return result;
-	}
-	def genArrayByteSetMultiple(i_old: SsaApplyOp, it: IntType, array: SsaInstr, i_offset: SsaInstr, offset: int, val: SsaInstr) {
-		// TODO: little-endian only for now
-		curBlock.at(i_old.source);
-		var size = it.packedByteSize();
-		var facts: Fact.set = Fact.O_NO_BOUNDS_CHECK;
-		var indexType = norm.config.RangeStartType;
-		for (i < size) {
-			var shifted = curBlock.addApplyF(it.opShr(), [val, newGraph.intConst(8 * i)], Facts.O_SAFE_SHIFT);
-			var b = curBlock.opIntViewI0(it, Byte.TYPE, shifted);
-			var write = curBlock.opArraySetElem(array.getType(), indexType, facts,
-				array, curBlock.opIntAdd(newGraph.intConst(i + offset), i_offset), b);
-			facts |= Fact.O_NO_NULL_CHECK;
 		}
 	}
 	def normDefault(i_old: SsaApplyOp, op: Operator) {
@@ -712,9 +702,9 @@ class SsaRaNormalizer extends SsaRebuilder {
 		return expr;
 	}
 	def normSimpleEqualOp(i_old: SsaApplyOp, op: Operator) {
-		var tn = normTypeArg(op, 0);
 		var refs = genRefs(i_old.inputs);
-		return map1(i_old, curBlock.opEqualOf(op, refs[0], refs[1]));
+		var tn = normTypeArg(op, 0), size = if(tn == null, 1, tn.size);
+		return map1(i_old, curBlock.opEqualOf(op, refs[0], refs[size]));
 	}
 	def normVariantEqual(i_old: SsaApplyOp, t: Type, x: SsaInstr, y: SsaInstr) -> SsaInstr {
 		var rc = norm.ra.getClass(t);
@@ -784,7 +774,19 @@ class SsaRaNormalizer extends SsaRebuilder {
 	}
 	def normVariantGetTag(vn: VariantNorm, args: Range<SsaInstr>) -> SsaInstr {
 		if (vn == null) return null;
-		if (vn.hasNoTag()) return newGraph.zeroConst();
+		if (vn.hasNoTag()) {
+			var tagValue = vn.tagValue;
+			if (tagValue < 0) {
+				// The variant has no tag, check live subtypes for possible live tag values.
+				var rc = norm.ra.getClass(vn.oldType);
+				var tl = rc.subtypes;
+				if (tl != null) {
+					var sn = VariantNorm.!(norm.norm(tl.head.oldType));
+					tagValue = sn.tagValue;
+				}
+			}
+			return newGraph.intConst(tagValue);
+		}
 		if (vn.hasExplicitTag() && vn.tag.isPacked()) {
 			var tag = vn.tag, tagIdx = tag.indexes[0], tagInterval = tag.intervals[0];
 			return genExtractInterval(args[tagIdx], tagInterval, IntRepType.!(vn.at(tagIdx)), tag.tn.at(0));
@@ -1040,7 +1042,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 		if (startType.width > 32) start = curBlock.opIntViewI0(startType, rangeLengthType, start);
 
 		if (norm.config.NormalizeRange && rangeNorm.arrayNorm.size <= 1) {
-			result[rangeNorm.startIndex()] = curBlock.opRangeStartPlusIndex(rangeNorm.oldType, rangeLengthType, i_old.facts, rangeStart, start);
+			result[rangeNorm.startIndex()] = curBlock.opRangeStartPlusIndex(rangeNorm.arrayNorm.newType, rangeLengthType, i_old.facts, rangeStart, start);
 		} else {
 			result[rangeNorm.startIndex()] = curBlock.opIntAdd(start, rangeStart);
 		}
@@ -1077,7 +1079,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 		for (i < rangeNorm.startIndex()) result[i] = ai_new[i];
 
 		if (norm.config.NormalizeRange && rangeNorm.arrayNorm.size <= 1) {
-			result[rangeNorm.startIndex()] = curBlock.opRangeStartPlusIndex(rangeNorm.oldType, rangeLengthType, i_old.facts, rangeStart, start);
+			result[rangeNorm.startIndex()] = curBlock.opRangeStartPlusIndex(rangeNorm.arrayNorm.newType, rangeLengthType, i_old.facts, rangeStart, start);
 		} else {
 			result[rangeNorm.startIndex()] = curBlock.opIntAdd(start, rangeStart);
 		}
@@ -1291,12 +1293,6 @@ class SsaRaNormalizer extends SsaRebuilder {
 	}
 	def normClassAlloc(i_old: SsaApplyOp, m: IrMethod, op: Operator) {
 		var rc = norm.ra.getClass(op.typeArgs[0]);
-		var vn = rc.variantNorm;
-		if (vn != null) {
-			var inputs = genRefs(i_old.inputs);
-			var result = genVariantClassAlloc(vn, inputs);
-			return mapNnf(i_old, result);
-		}
 		if (m == null) {
 			// trivial constructor
 			var spec = IrSpec.new(op.typeArgs[0], op.typeArgs, null);
@@ -1326,11 +1322,10 @@ class SsaRaNormalizer extends SsaRebuilder {
 		if (nf.length == 0) {
 			// OPT: remove read of useless field
 			// OPT: remove read of zero-width field
-			if (!isVariant) addNullCheck(i_old, ai_new[0]);
 			return map0(i_old);
 		}
 		normType(raField.receiver); // XXX: normType() side-effect of flattening
-		if (isVariant && raField != null && rc.isUnboxed()) {
+		if (raField != null && rc.isUnboxed()) {
 			// field of unboxed data type
 			var vals = genVariantGetField(rc, raField, rc.variantNorm, ai_new);
 			return mapNnf(i_old, vals);
@@ -1348,6 +1343,47 @@ class SsaRaNormalizer extends SsaRebuilder {
 			vals[i] = curBlock.opGetField(nf[i], receiver);
 		}
 		return mapN(i_old, vals);
+	}
+	def normPtrAtUnboxedField(i_old: SsaApplyOp, specs: List<IrField>, op: Operator, boxKind: BoxKind) {
+		// XXX: propagate O_NO_NULL_CHECK and O_PURE
+		var ai_new = genRefs(i_old.inputs);
+		if (i_old.useList == null) {
+			// OPT: remove unused pointer construction
+			var result = SsaInstr.!(newGraph.intConst(0));
+			return map1(i_old, result);
+		}
+		// Need to start with outermost field access to get initial set of fields
+		var raField = extractFieldRef(i_old, specs.head);
+		var rc = norm.ra.getClass(raField.receiver);
+		var nf = raField.normOf(rc.liveFields);
+		normType(raField.receiver); // XXX: normType() side-effect of flattening
+		var prevType = raField.getClosedType();
+		// now, iterate winnowing down the fields
+		for (elt = specs.tail; elt != null && nf.length != 0; elt = elt.tail) {
+			var spec = elt.head;
+			var ctxt = if (specSet != null, specSet.first(), context.spec);
+			raField = norm.ra.makeField3(prevType, spec, ctxt);
+			prevType = raField.getClosedType();
+			nf = raField.normOf(nf);
+		}
+		// now should have a single field that we can do Pointer.atField
+		if (nf.length == 0) {
+			// can happen because of user's code, so not a compiler failure;
+			// checked in Reachability
+			var result = SsaInstr.!(newGraph.intConst(0));
+			return map1(i_old, result);
+		}
+		var ft = nf[0].asField().fieldType;
+		var op_out: Operator;
+		match (boxKind) {
+			OBJECT =>
+				op_out = V3Op.newPtrAtObjectField(nf[0], i_old.op.sig.returnType());
+			COMPONENT =>
+				op_out = V3Op.newPtrAtComponentField(nf[0], i_old.op.sig.returnType());
+		}
+		var new_inputs = if(ai_new.length == 0, Ssa.NO_INSTRS, [ai_new[0]]);
+		var i_new = curBlock.addApply(curBlock.source, op_out, new_inputs);
+		return map1(i_old, i_new);
 	}
 	def normClassSetField(i_old: SsaApplyOp, field: IrField, op: Operator, init: bool) {
 		// XXX: propagate O_NO_NULL_CHECK
@@ -1376,6 +1412,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 		}
 	}
 	def genVariantScalarView(oldType: Type, newType: Type, i_scalar: SsaInstr) -> SsaInstr {
+		if (oldType == newType) return i_scalar;
 		if (IntType.?(oldType) && IntType.?(newType)) return curBlock.opIntView(oldType, IntType.!(newType), i_scalar);
 		if (IntType.?(oldType)) {
 			match (newType) {
@@ -1393,28 +1430,55 @@ class SsaRaNormalizer extends SsaRebuilder {
 		if (newType == AnyRef.TYPE) return i_scalar;
 		return curBlock.opTypeSubsume(oldType, newType, i_scalar);
 	}
-	def genVariantClassAlloc(vn: VariantNorm, ai_inputs: Array<SsaInstr>) -> Array<SsaInstr> {
-		if (vn.isEnum()) return [newGraph.intConst(vn.tagValue)];
-
-		var result = Array<SsaInstr>.new(vn.size);
-		for (i < result.length) result[i] = newGraph.nullConst(vn.at(i));
-
-		if (vn.hasExplicitTag()) {
-			var tagIdx = vn.tag.indexes[0];
-			if (IntRepType.?(vn.at(tagIdx))) result[tagIdx] = genSetInterval(result[tagIdx], newGraph.intConst(vn.tagValue), vn.tag.intervals[0], vn.tag.tn.newType, IntRepType.!(vn.at(tagIdx)));
-			else result[tagIdx] = newGraph.intConst(vn.tagValue);
-		}
-
-		for (i < vn.fields.length) {
-			var f = vn.fields[i];
-			var fieldRanges = vn.fieldRanges[i], os = fieldRanges.0;
-			for (j < f.indexes.length) {
-				var idx = f.indexes[j];
-				if (IntRepType.?(vn.at(idx)) && f.intervals != null) result[idx] = genSetInterval(result[idx], ai_inputs[os + j], f.intervals[j], f.tn.at(j), IntRepType.!(vn.at(idx)));
-				else result[idx] = genVariantScalarView(f.tn.at(j), vn.at(idx), ai_inputs[os + j]);
+	def normVariantAlloc(i_old: SsaInstr, op: Operator) {
+		var ai_inputs = genRefs(i_old.inputs);
+		var t = op.typeArgs[0];
+		var rc = norm.ra.getClass(t);
+		var vn = rc.variantNorm;
+		if (vn == null) {
+			// Variant is boxed. Simply a VariantAlloc with normalized fields.
+			norm.makeOrigFieldTypes(rc);
+			var lfs = rc.liveFields;
+			var ai_fields = Array<SsaInstr>.new(lfs.length);
+			var fieldTypes = Array<Type>.new(lfs.length);
+			var j = 0;
+			for (rf in rc.fields) {
+				if (rf == null) continue;
+				var norm = rf.normIndices, orig = rf.origIndices.0;
+				for (i = norm.0; i < norm.1; i++) {
+					var prev = orig + i - norm.0;
+					ai_fields[i] = ai_inputs[prev];
+					fieldTypes[i] = if(rf.typeNorm == null, rf.orig.fieldType, rf.typeNorm.newType);
+				}
 			}
+			// XXX: cache VariantAllocOp
+			return map1(i_old, curBlock.pure(V3Op.newVariantAlloc(t, fieldTypes), ai_fields));
+		} else if (vn.isEnum()) {
+			// Variant is represented as an enum.
+			return map1(i_old, newGraph.intConst(vn.tagValue));
+		} else {
+			// Variant is unboxed.
+			var result = Array<SsaInstr>.new(vn.size);
+			for (i < result.length) result[i] = newGraph.nullConst(vn.at(i));
+
+			if (vn.hasExplicitTag()) {
+				var tagIdx = vn.tag.indexes[0];
+				if (IntRepType.?(vn.at(tagIdx))) result[tagIdx] = genSetInterval(result[tagIdx], newGraph.intConst(vn.tagValue), vn.tag.intervals[0], vn.tag.tn.newType, IntRepType.!(vn.at(tagIdx)));
+				else result[tagIdx] = newGraph.intConst(vn.tagValue);
+			}
+
+			for (i < vn.fields.length) {
+				var f = vn.fields[i];
+				if (f.rf == null) continue;
+				var os = f.rf.origIndices.0;
+				for (j < f.indexes.length) {
+					var idx = f.indexes[j];
+					if (IntRepType.?(vn.at(idx)) && f.intervals != null) result[idx] = genSetInterval(result[idx], ai_inputs[os + j], f.intervals[j], f.tn.at(j), IntRepType.!(vn.at(idx)));
+					else result[idx] = genVariantScalarView(f.tn.at(j), vn.at(idx), ai_inputs[os + j]);
+				}
+			}
+			return mapN(i_old, result);
 		}
-		return result;
 	}
 	def genExtractInterval(scalar: SsaInstr, interval: Interval, ft: IntRepType, tt: Type) -> SsaInstr {
 		if (interval.start > 0) scalar = curBlock.addApplyF(ft.opShr(), [scalar, newGraph.intConst(interval.start)], Facts.O_SAFE_SHIFT);
@@ -1422,6 +1486,7 @@ class SsaRaNormalizer extends SsaRebuilder {
 		return scalar;
 	}
 	def genSetInterval(scalar: SsaInstr, value: SsaInstr, interval: Interval, ft: Type, tt: IntRepType) -> SsaInstr {
+		// TODO: signed integer types require another mask before shifting
 		var intRep = genVariantScalarView(ft, tt, value);
 		intRep = curBlock.addApplyF(tt.opShl(), [intRep, newGraph.intConst(interval.start)], Facts.O_SAFE_SHIFT);
 		return curBlock.pure(tt.opOr(), [scalar, intRep]);
@@ -1437,6 +1502,21 @@ class SsaRaNormalizer extends SsaRebuilder {
 			else vals[i] = genVariantScalarView(rc.variantNorm.at(idx), field.tn.at(i), ninputs[idx]);
 		}
 		return vals;
+	}
+	def getVariantUnboxedField(rc: RaClass, raField: RaField, vn: VariantNorm, ninputs: Array<IrField>) -> Array<IrField> {
+		var nf = raField.liveFields(norm.ra);
+		var flds = Array<IrField>.new(nf.length);
+		var field = rc.variantNorm.fields[raField.orig.index];
+
+		for (i < flds.length) {
+			var idx = field.indexes[i];
+			if (IntRepType.?(vn.at(idx)) && field.intervals != null && field.intervals[i].start > 0) {
+				// punt on bitfield hackery
+			} else {
+				flds[i] = ninputs[idx];
+			}
+		}
+		return flds;
 	}
 	def normNullCheck(oldApp: SsaApplyOp, op: Operator) {
 		var newArgs = genRefs(oldApp.inputs);
@@ -1527,4 +1607,9 @@ class SsaRaNormalizer extends SsaRebuilder {
 	private def addNullCheck(i_old: SsaInstr, obj: SsaInstr) {
 		if (!i_old.facts.O_NO_NULL_CHECK) curBlock.opNullCheck(obj.getType(), obj);
 	}
+}
+
+enum BoxKind {
+	OBJECT,
+	COMPONENT
 }

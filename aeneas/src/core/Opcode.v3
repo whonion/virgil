@@ -103,6 +103,7 @@ type Opcode {
 	// Variant operations
 	case VariantEq;
 	case VariantGetTag;
+	case VariantAlloc;
 	case VariantGetField(field: IrField);
 	case VariantGetMethod(method: IrMethod);
 	case VariantGetVirtual(method: IrMethod);
@@ -132,13 +133,13 @@ type Opcode {
 	case RefLayoutAt;
 	case RefLayoutOf;
 	case RefLayoutIn(offset: int);
-	case RefLayoutGetField(offset: int);
-	case RefLayoutSetField(offset: int);
+	case RefLayoutGetField(offset: int, order: ByteOrder);
+	case RefLayoutSetField(offset: int, order: ByteOrder);
 	case RefLayoutAtRepeatedField(offset: int, scale: int, max: int);
-	case RefLayoutGetRepeatedField(offset: int, scale: int, max: int);
-	case RefLayoutSetRepeatedField(offset: int, scale: int, max: int);
-	case ByteArrayGetField(offset: int);
-	case ByteArraySetField(offset: int);
+	case RefLayoutGetRepeatedField(offset: int, scale: int, max: int, order: ByteOrder);
+	case RefLayoutSetRepeatedField(offset: int, scale: int, max: int, order: ByteOrder);
+	case ByteArrayGetField(offset: int, order: ByteOrder);
+	case ByteArraySetField(offset: int, order: ByteOrder);
 	case ForgeRange;
 	// System operations
 	case SystemCall(syscall: SystemCall);
@@ -161,6 +162,8 @@ type Opcode {
 	case PtrAtComponentField(field: IrField);
 	case PtrAtObjectField(field: IrField);
 	case PtrAtRefLayoutField(offset: int);
+	case PtrAtUnboxedObjectField(fields: List<IrField>);
+	case PtrAtUnboxedComponentField(fields: List<IrField>);
 	case PtrCmpSwp;
 	case PtrLoad;
 	case PtrStore;
@@ -182,7 +185,8 @@ component Opcodes {
 		var F = Fact.O_FOLDABLE;
 		var P = Fact.O_PURE | Fact.O_FOLDABLE; // pure => foldable
 		var C = Fact.O_COMMUTATIVE;
-		var A = Fact.O_ASSOCIATIVE;
+		// var A = Fact.O_ASSOCIATIVE;	// not exploited
+		var A = Facts.NONE;	// for now, since needed the bit
 		var NZ   = Fact.V_NON_ZERO;
 		var NNEG = Fact.V_NON_NEGATIVE;
 		var NNC = Fact.O_NO_NULL_CHECK;
@@ -323,7 +327,9 @@ component Opcodes {
 		t[Opcode.PtrAtRangeElem.tag] =		F;
 		t[Opcode.PtrAtArrayElem.tag] =		F;
 		t[Opcode.PtrAtComponentField.tag] =	P;
-		t[Opcode.PtrAtObjectField.tag] =	F;
+		t[Opcode.PtrAtObjectField.tag] =	P;
+		t[Opcode.PtrAtUnboxedObjectField.tag] =	P;
+		t[Opcode.PtrAtUnboxedComponentField.tag] =	P;
 		t[Opcode.PtrLoad.tag] =			NONE;
 		t[Opcode.PtrStore.tag] =		NONE;
 

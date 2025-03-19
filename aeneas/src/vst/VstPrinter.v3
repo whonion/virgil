@@ -10,6 +10,9 @@ class Printer(printer: VstPrinter) {
 	def printComponent(cdecl: VstComponent) {
 		printVstCompound("component ", cdecl);
 	}
+	def printLayout(p: VstLayout) {
+		printVstCompound("layout ", p);
+	}
 	def printVstCompound(kind: string, compound: VstCompound) {
 		Terminal.put(kind);
 		Terminal.put(compound.name());
@@ -27,9 +30,12 @@ class Printer(printer: VstPrinter) {
 		Terminal.put("}\n");
 	}
 	def printMember(decl: VstMember) {
-		if (VstField.?(decl)) printField(VstField.!(decl));
-		else if (VstNew.?(decl)) printNew(VstNew.!(decl));
-		else if (VstMethod.?(decl)) printMethod(VstMethod.!(decl));
+		match (decl) {
+			x: VstField => printField(x);
+			x: VstNew => printNew(x);
+			x: VstMethod => printMethod(x);
+			x: VstLayoutField => printLayoutField(x);
+		}
 	}
 	def printMethod(mdecl: VstMethod) {
 		space("method ");
@@ -73,6 +79,12 @@ class Printer(printer: VstPrinter) {
 		printTypeRef(fdecl.tref);
 		printer.printVstField(fdecl);
 	}
+	def printLayoutField(fdecl: VstLayoutField) {
+		Terminal.put1("    +%d ", fdecl.byteOffset);
+		Terminal.put(fdecl.name());
+		Terminal.put1(": %q\n", fdecl.mtref.render);
+//		printer.printVstField(fdecl);
+	}
 	def printTypeRef(tref: TypeRef) {
 		if (tref == null) return Terminal.put("null");
 		var buf = TerminalBuffer.new();
@@ -107,6 +119,7 @@ class Printer(printer: VstPrinter) {
 				Terminal.put("#packing ");
 				printCommaList(p.list, printPackingExpr);
 			}
+			BigEndian => Terminal.put("#big-endian");
 			Other(s) => Terminal.put1("#%s", s);
 		}
 	}
@@ -184,12 +197,16 @@ class VstPrinter extends VstVisitor<int, void> {
 			Terminal.sp();
 			p.printCommaList<VstRepHint>(fdecl.repHints, p.printRepHint);
 		}
+		if (fdecl.pointedAt) {
+			Terminal.put(" pointedAt");
+		}
 		Terminal.put(";\n");
 	}
 	def printProgram(prog: Program) {
 		prog.vst.components.apply(p.printComponent);
 		prog.vst.classes.apply(p.printClass);
 		prog.vst.packings.apply(p.printPacking);
+		prog.vst.layouts.apply(p.printLayout);
 	}
 	def visitIf(stmt: IfStmt, indent: int) {
 		p.enter("IfStmt", indent);
@@ -277,8 +294,8 @@ class VstPrinter extends VstVisitor<int, void> {
 	def visitIfExpr(expr: IfExpr, indent: int) {
 		param("IfExpr", null, expr.exprs.list, expr.exactType, expr.implicitType, indent);
 	}
-	def visitFuncExpr(expr: FuncExpr, indent: int) {
-		p.enter("FuncExpr ", indent);
+	def visitFunExpr(expr: FunExpr, indent: int) {
+		p.enter("FunExpr ", indent);
 		if (expr.name != null) Terminal.put1("\"%s\" ", expr.name.image);
 		Terminal.putc('(');
 		p.printCommaList(expr.params.list, p.printParam);
@@ -307,7 +324,37 @@ class VstPrinter extends VstVisitor<int, void> {
 		param("StringExpr", expr.token.image, null, expr.exactType, expr.implicitType, indent);
 	}
 	def visitApp(expr: AppExpr, indent: int) {
-		param("AppExpr", null, List.new(expr.func, expr.args.exprs.list), expr.exactType, expr.implicitType, indent);
+		var args = expr.args.exprs.list;
+		if (expr.target != null) args = List.new(expr.target, args);
+		var extra: string = null;
+		match (expr.appbind) {
+			CallComponentMethod(x_rcvr, member, x_ta)	=> { extra = member.name(); }
+			CallObjectMethod(x_rcvr, member, x_ta)		=> { extra = member.name(); }
+			CallClassMethod(x_rcvr, member, x_ta)		=> { extra = member.name(); }
+			PtrAtComponentField(x_rcvr, field, x_ta)	=> { extra = field.name(); }
+			PtrAtObjectField(x_rcvr, field, x_ta)		=> { extra = field.name(); }
+			PtrAtRefLayoutField(x_rcvr, field, x_ta)	=> { extra = field.name(); }
+			PtrAtUnboxedObjectField(x_rcvr, fields, x_ta)	=> {
+				var buf = StringBuilder.new();
+				var flds = fields;
+				while (flds != null) {
+					buf.putc('.').puts(flds.head.1.name());
+					flds = flds.tail;
+				}
+				extra = buf.toString();
+			}
+			PtrAtUnboxedComponentField(x_rcvr, fields, x_ta) => {
+				var buf = StringBuilder.new();
+				var flds = fields;
+				while (flds != null) {
+					buf.putc('.').puts(flds.head.1.name());
+					flds = flds.tail;
+				}
+				extra = buf.toString();
+			}
+			_ => ;
+		}
+		param("AppExpr", extra, List.new(expr.func, args), expr.exactType, expr.implicitType, indent);
 	}
 	def visitIndex(expr: IndexExpr, indent: int) {
 		var buf = StringBuilder.new();

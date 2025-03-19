@@ -5,19 +5,38 @@
 if [ $# -gt 0 ]; then
   TESTS="$*"
 else
-  TESTS=$(cat core.gc cast.gc variants.gc large.gc)
+  TESTS=$(cat *.gc)
 fi
 
+function set_rt_files() {
+    target=$1
+    N="$RT_LOC/native/"
+    GC_SOURCES="${GC_LOC}/*.v3"
+
+    if [ "$target" = "x86-darwin" ]; then
+	export RT_FILES="$RT_LOC/x86-darwin/*.v3 $N/*.v3 $GC_SOURCES"
+    elif [ "$target" = "x86-64-darwin" ]; then
+	export RT_FILES="$RT_LOC/x86-64-darwin/*.v3 $N/*.v3 $GC_SOURCES"
+    elif [ "$target" = "x86-linux" ]; then
+	export RT_FILES="$RT_LOC/x86-linux/*.v3 $N/*.v3 $GC_SOURCES"
+    elif [ "$target" = "x86-64-linux" ]; then
+	export RT_FILES="$RT_LOC/x86-64-linux/*.v3 $N/*.v3 $GC_SOURCES"
+    elif [ "$target" = "wasm" ]; then
+	export RT_FILES="./EmptySystem.v3 $N/NativeGlobalsScanner.v3 $N/NativeFileStream.v3 $GC_SOURCES"
+    fi
+}
+
+
 function compile_gc_tests() {
-    local SHARDING=100
+    local SHARDING=80
     local target=$1
     shift
 
-    RT_FILES="-rt.files=$(echo $OS_SOURCES $NATIVE_SOURCES $GC_SOURCES)"
     local i=1
+    RT_OPT="-rt.files=$(echo $RT_FILES)"
     while [ $i -le $# ]; do
 	local args=${@:$i:$SHARDING}
-	run_v3c "" -output=$T -target=$target-test -rt.gc -rt.gctables -rt.test-gc -rt.sttables -set-exec=false -heap-size=10k "$RT_FILES" -multiple $args
+	run_v3c "" -symbols -output=$T -target=$target-test -rt.gc -rt.gctables -rt.test-gc -rt.sttables -set-exec=false -shadow-stack-size=4k -heap-size=10k "$RT_OPT" -multiple $args
 	i=$(($i + $SHARDING))
     done
 }
@@ -35,7 +54,7 @@ function do_int_test() {
     fi
 
     BEFORE=$V3C_OPTS
-    V3C_OPTS="$V3C_OPTS $HEAP"
+    V3C_OPTS="$V3C_OPTS $HEAP -shadow-stack-size=1m"
     QUIET_COMPILE=1
     compile_aeneas $AENEAS_TEST $OUT $target
     V3C_OPTS="$BEFORE"
@@ -43,13 +62,14 @@ function do_int_test() {
     print_status Testing "$target $HEAP" Aeneas
     if [ -x $CONFIG/run-$target ]; then
 	$T/Aeneas -test -ra $VIRGIL_LOC/test/core/*.v3 | tee $T/Aeneas-gc.test.out | $PROGRESS
+        fail_fast
     else
 	echo "${YELLOW}skipped${NORM}"
     fi
 }
 
 function do_exe_test() {
-    set_os_sources $target
+    set_rt_files $target
     T=$OUT/$target
     mkdir -p $T
     C=$T/compile.out
@@ -58,20 +78,16 @@ function do_exe_test() {
 
     print_compiling "$target" ""
     compile_gc_tests $target $TESTS | tee $T/compile.all.out | $PROGRESS
+    fail_fast
 
     execute_target_tests $target
+    fail_fast
 }
 
 for target in $TEST_TARGETS; do
-    is_gc_target $target
-    if [ $? = 0 ]; then
-	do_exe_test
-    fi
+    is_gc_target $target && do_exe_test || do_nothing
 done
 
-for target in $TEST_TARGETS; do
-    is_gc_target $target
-    if [ $? = 0 ]; then
-	do_int_test
-    fi
+for target in $(get_io_targets); do
+    is_gc_target $target && do_int_test || do_nothing
 done

@@ -29,6 +29,7 @@ component Keywords {
 			("extends",	KC_OTHER),
 			("false",	KC_FALSE),
 			("for",		KC_OTHER),
+			("fun",		KC_OTHER),
 			("if",		KC_OTHER),
 			("import",	KC_OTHER),
 			("in",		KC_OTHER),
@@ -41,6 +42,7 @@ component Keywords {
 			("return",	KC_OTHER),
 			("struct",	KC_OTHER),
 			("super",	KC_OTHER),
+			("thread",	KC_OTHER),
 			("true",	KC_TRUE),
 			("type",	KC_OTHER),
 			("var",		KC_VAR),
@@ -98,7 +100,8 @@ component Parser {
 	def parseFile(fileName: string, input: Array<byte>, ERROR: ErrorGen, typeCache: TypeCache) -> VstFile {
 		var file = VstFile.new(fileName, input);
 		var p = ParserState.new(file, ERROR, skipToNextToken, typeCache);
-		p.enableFuncExprs = CLOptions.FUNC_EXPRS.get();
+		p.enableFunExprs = CLOptions.FUN_EXPRS.get();
+		p.enableSimpleBodies = CLOptions.SIMPLE_BODIES.get();
 
 		file.input = input;
 		file.lineEnds = p.lineEnds;
@@ -121,7 +124,7 @@ component Parser {
 		match (p.curByte) {
 			'c' => {
 				if (optKeyword(p, "class") != null) return parseClass(p, file, false);
-				if (optKeyword(p, "component") != null) return parseComponent(p, file, false);
+				if (optKeyword(p, "component") != null) return parseComponent(p, file, false, false);
 			}
 			'i' => {
 				var importToken = optKeyword(p, "import");
@@ -131,7 +134,7 @@ component Parser {
 						var id = parseIdentVoid(p).name;
 						var members = parseMembers(p, true);
 						if (importName == null) importName = id;
-						var decl = VstComponent.new(false, importName, id, members);
+						var decl = VstComponent.new(false, false, importName, id, members);
 						file.components.put(decl);
 						return true;
 					}
@@ -149,6 +152,7 @@ component Parser {
 			}
 			't' => {
 				if (optKeyword(p, "type") != null) return parseVariant(p, file, false);
+				if (optKeyword(p, "thread") != null && optKeyword(p, "component") != null) return parseComponent(p, file, false, true);
 			}
 			'e' => {
 				if (optKeyword(p, "enum") != null) return parseEnum(p, file, false);
@@ -157,7 +161,8 @@ component Parser {
 			'p' => {
 				if (optKeyword(p, "private") != null) {
 					if (optKeyword(p, "class") != null) return parseClass(p, file, true);
-					if (optKeyword(p, "component") != null) return parseComponent(p, file, true);
+					if (optKeyword(p, "component") != null) return parseComponent(p, file, true, false);
+					if (optKeyword(p, "thread") != null && optKeyword(p, "component") != null) return parseComponent(p, file, true, true);
 					if (optKeyword(p, "type") != null) return parseVariant(p, file, true);
 					if (optKeyword(p, "enum") != null) return parseEnum(p, file, true);
 					if (optKeyword(p, "packing") != null) return parsePacking(p, file, true);
@@ -187,10 +192,10 @@ component Parser {
 		file.classes.put(decl);
 		return true;
 	}
-	def parseComponent(p: ParserState, file: VstFile, isPrivate: bool) -> bool {
+	def parseComponent(p: ParserState, file: VstFile, isPrivate: bool, isThread: bool) -> bool {
 		var id = parseIdentVoid(p).name;
 		var members = parseMembers(p, false);
-		var decl = VstComponent.new(isPrivate, null, id, members);
+		var decl = VstComponent.new(isPrivate, isThread, null, id, members);
 		file.components.put(decl);
 		return true;
 	}
@@ -303,6 +308,7 @@ component Parser {
 					if (Strings.equal(name, "boxed")) result = VstRepHint.Boxed;
 					else if (Strings.equal(name, "unboxed")) result = VstRepHint.Unboxed;
 					else if (Strings.equal(name, "packed")) result = VstRepHint.Packed;
+					else if (Strings.equal(name, "big-endian")) result = VstRepHint.BigEndian;
 					else result = VstRepHint.Other(name);
 				}
 				_ => kwError(p, id.name);
@@ -348,24 +354,31 @@ component Parser {
 		return null;
 	}
 	def parseExport(p: ParserState, file: VstFile) -> bool {
+		var expname = parseOptString(p);
 		if (optKeyword(p, "def") != null) {
 			// export def name...
 			var synthetic = file.getSyntheticComponent();
 			var before = synthetic.members;
 			var list = synthetic.members = PUBLIC_DEF.parseDef(p, synthetic.members, null);
-			var rev: List<Decl>;
+			var rev: List<Decl>, count = 0;
 			for (l = list; l != before; l = l.tail) {
 				rev = List.new(l.head, rev); // local reversal of newly added members
+				count++;
+			}
+			if (expname != null && count > 1) {
+				var second = rev.tail.head;
+				p.errorAt(second.token.range(), "export with explict name applied to multiple declarations");
 			}
 			// Add exports in the right order.
 			for (l = rev; l != null; l = l.tail) {
 				var expr = VarExpr.new(null, null, VstIdent<TypeRef>.new(l.head.token, 0, null));
-				file.exports.put(ExportDecl.new(l.head.token, l.head.token.image, synthetic, expr));
+				var n = if(expname != null, expname, l.head.token).image;
+				file.exports.put(ExportDecl.new(l.head.token, n, synthetic, expr));
 			}
 			return true;
 		}
 		var id: VstIdent<TypeRef>;
-		var token = parseOptString(p);
+		var token = expname;
 		if (token == null) {
 			id = parseIdent(p, parseTypeRef);
 			token = id.name;
@@ -501,7 +514,7 @@ component Parser {
 			if (pt != null) rettype = ReturnType.This(Token.new(p.fileName, str, loc.0, loc.1));
 			else rettype = ReturnType.Explicit(Parser.parseTypeRef(p));
 			body = if(p.curByte == ';', EmptyStmt.new(p.token(1)), Parser.parseBlockStmt(p));
-		} else if ((start = p.optN("=>")) >= 0) {
+		} else if (Debug.UNSTABLE && p.enableSimpleBodies && (start = p.optN("=>")) >= 0) {
 			var expr = parseExpr(p);
 			rettype = ReturnType.Implicit(expr);
 			if (isDef) p.req1(';');
@@ -793,7 +806,7 @@ component Parser {
 		if (p.curByte == '(') { // nested function
 			var params = parseTypedMethodParams(p);
 			var t = parseReturnTypeAndBody(p, true);
-			var init = FuncExpr.new(start, id.name, params, t.0, t.1);
+			var init = FunExpr.new(start, id.name, params, t.0, t.1);
 			var v = VarDecl.new(id.name, null, init);
 			return LocalStmt.new(start, List.new(v, null));
 		}
@@ -846,13 +859,15 @@ component Parser {
 			}
 			return parseVarExpr(p);
 		}
-		if (p.enableFuncExprs && ch == 'd') {
-			var start = optKeyword(p, "def");
+		if (Debug.UNSTABLE && p.enableFunExprs && ch == 'f') {
+			var start = optKeyword(p, "fun");
 			if (start != null) {
 				var id = if(Char.isIdentStart(p.curByte), parseIdentVoid(p).name);
-				var params = parseMethodParams(p);
+				var params = if(p.curByte == '(',  // TODO: allow single identifier param
+					parseMethodParams(p),
+					VstList<ParamDecl>.new(p.point().rangeOf(0), null));
 				var t = parseReturnTypeAndBody(p, false);
-				return FuncExpr.new(start, id, params, t.0, t.1);
+				return FunExpr.new(start, id, params, t.0, t.1);
 			}
 			return parseVarExpr(p);
 		}
@@ -955,14 +970,16 @@ component Parser {
 		np.accept_width = true;
 		if (np.parse()) {
 			var len = np.pos;
+			var vtype = VstNumberParser.getType(np);
+			var val = VstNumberParser.getVal(np);
 			if (np.is_binary) {
-				return BinLiteral.new(p.token(len), np.val, np.vtype, np.l_suffix, np.u_suffix, np.digits);
+				return BinLiteral.new(p.token(len), val, vtype, np.l_suffix, np.u_suffix, np.digits);
 			} else if (np.is_hex) {
-				return HexLiteral.new(p.token(len), np.val, np.vtype, np.l_suffix, np.u_suffix, np.digits);
+				return HexLiteral.new(p.token(len), val, vtype, np.l_suffix, np.u_suffix, np.digits);
 			} else if (np.is_float) {
-				return FloatLiteral.new(p.token(len), np.val, np.vtype);
+				return FloatLiteral.new(p.token(len), val, vtype);
 			} else {
-				return DecLiteral.new(p.token(len), np.val, np.vtype, np.l_suffix, np.u_suffix, np.is_negative);
+				return DecLiteral.new(p.token(len), val, vtype, np.l_suffix, np.u_suffix, np.is_negative);
 			}
 		} else {
 			p.errorAtOffset(np.error_pos, np.error_msg);
@@ -1447,25 +1464,24 @@ class VarDefParser(isPrivate: bool, writability: Writability) {
 	def parseIndexed(p: ParserState, prev: List<VstMember>) -> List<VstMember> {
 		if (writability == Writability.PRIVATE_WRITEABLE) p.error("invalid access modifiers for indexing method declaration");
 		var params = Parser.parseList(0, p, '[', Parser.COMMA, ']', Parser.parseTypedMethodParam);
-		var rtype: ReturnType;
-		var name: string;
-		if (p.curByte == '=') {
+		if (p.curByte == '=' && p.peek(1) != '>') {
 			p.req1('=');
 			var val = Parser.parseTypedMethodParam(p);
-			rtype = ReturnType.Void;
+			var rtype = ReturnType.Void;
 			var l = List.new(val, Lists.reverse(params.list));
 			params = VstList.new(params.src, Lists.reverse(l));
-			name = "[]=";
+			var r = params.range();
+			var token = Token.new(r.fileName, "[]=", r.beginLine, r.beginColumn);
+			var body = if(p.curByte == ';', EmptyStmt.new(p.token(1)), Parser.parseBlockStmt(p));
+			var m = VstMethod.new(isPrivate, token, null, params, rtype, body);
+			return List.new(m, prev);
 		} else {
-			p.reqN("->");
-			rtype = ReturnType.Explicit(Parser.parseTypeRef(p));
-			name = "[]";
+			var t = Parser.parseReturnTypeAndBody(p, true);
+			var r = params.range();
+			var token = Token.new(r.fileName, "[]", r.beginLine, r.beginColumn);
+			var m = VstMethod.new(isPrivate, token, null, params, t.0, t.1);
+			return List.new(m, prev);
 		}
-		var r = params.range();
-		var token = Token.new(r.fileName, name, r.beginLine, r.beginColumn);
-		var body = if(p.curByte == ';', EmptyStmt.new(p.token(1)), Parser.parseBlockStmt(p));
-		var m = VstMethod.new(isPrivate, token, null, params, rtype, body);
-		return List.new(m, prev);
 	}
 	def parseVar(p: ParserState, prev: List<VstMember>) -> List<VstMember> {
 		var id = Parser.parseIdentVoid(p);

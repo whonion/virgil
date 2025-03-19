@@ -47,10 +47,7 @@ class MachDataWriter extends DataWriter {
 	}
 	def alignAddr(size: int) {
 		var rem = (pos + startAddr) & (size - 1);
-		if (rem > 0) {
-			acquire(size - rem);
-			at(pos + size - rem);
-		}
+		if (rem > 0) skipN(rem);
 	}
 	def posAddr() -> int {
 		return startAddr + pos;
@@ -66,7 +63,7 @@ class MachDataWriter extends DataWriter {
 	}
 	def putmd(w: MachDataWriter) {
 		var p = this.pos;
-		putk(w.data, 0, w.end());
+		putr(w.alias());
 		for (l = w.refs; l != null; l = l.tail) {
 			var t = l.head;
 			refs = List.new((t.0, t.1 + p, t.2 + p), refs);

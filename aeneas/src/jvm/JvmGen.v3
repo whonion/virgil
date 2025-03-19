@@ -37,6 +37,9 @@ class JvmProgram(compiler: Compiler, prog: Program) {
 		if (prog.getMain() != null) jvmType(prog.getMain().receiver);
 		prog.ir.classes.apply(processIrClass);
 		var pos = Vectors.drain(classQueue, 0, JvmClassGen.build);
+		context.method = null;
+		context.block = null;
+		context.graph = null;
 		jheap.emit();
 		Vectors.drain(classQueue, pos, JvmClassGen.build);
 		classQueue.apply(JvmClassGen.emit);
@@ -184,7 +187,12 @@ class JvmProgram(compiler: Compiler, prog: Program) {
 				}
 			}
 		}
-		return Mangle.mangleB(r, target).toString();
+		var name_builder = Mangle.mangleB(r, target);
+		if (ClassType.?(t) && ClassType.!(t).classDecl.isPrivate) {
+			// uniquify private classes with the type uid to avoid namespace clashes
+			return name_builder.put1("_%d", t.typeCon.uid).toString();
+		}
+		return name_builder.toString();
 	}
 	def newClosure(memberRef: IrSpec) -> JvmClass {
 		var className = mangleClosureName(memberRef);

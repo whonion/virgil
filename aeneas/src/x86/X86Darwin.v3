@@ -23,17 +23,14 @@ class X86DarwinTarget extends Target {
 	}
 	private def getScalar(compiler: Compiler, prog: Program, t: Type) -> Scalar.set {
 		match (t) {
-			x: BoolType => return Scalar.B32 | Scalar.B64;
-			x: IntType => return if(x.width <= 32, Scalar.B32 | Scalar.B64, Scalar.B64); // XXX: Scalar.R32, once packed refs
 			x: FloatType => return if(x.is64, Scalar.F64 | Scalar.B64, Scalar.F32 | Scalar.B32);
+			x: PrimType => return if(x.width <= 32, Scalar.B32 | Scalar.B64, Scalar.B64); // XXX: Scalar.R32, once packed refs
 			_ => return Scalar.R32;
 		}
 	}
 	private def getBitWidth(compiler: Compiler, prog: Program, t: Type) -> byte {
 		match (t) {
-			x: BoolType => return 1;
-			x: IntType => return x.width;
-			x: FloatType => return x.total_width;
+			x: PrimType => return x.width;
 			_ => return 32;
 		}
 	}
@@ -88,6 +85,10 @@ class X86DarwinTarget extends Target {
 		header.addCmd(ts);
 		// ex segment for trapping explicit checks
 		var ex = if(rt.src != null, newSegmentLoad(header, "__EX", 0));
+		// rtexe segment for runtime code
+		var runtimeCodeSize = int.!(CLOptions.RUNTIME_CODE_SIZE.get());
+		var rtexe = if(runtimeCodeSize > 0, newSegmentLoad(header, "__RT_TEXT", MachO.VM_PROT_RWX));
+
 		// create the buffer
 		var w = MachDataWriter.new(rt.codeRegion.space.pageAlign,
 			startAddr, 300 + mach.numMethods * 50);
@@ -105,6 +106,7 @@ class X86DarwinTarget extends Target {
 		var size = w.end();
 		if (size < pageAlign.size) w.skipN(pageAlign.size - size); // MacOS security requires >= 4096 bytes
 		rt.recordCodeEnd(w.endAddr());
+		mach.reserveSupplementalCode(w);
 		mach.layoutMeta(w);
 		mach.layoutRuntime(w);
 		cs.filesize = w.end();
@@ -121,6 +123,18 @@ class X86DarwinTarget extends Target {
 			ex.filesize = 0;
 			ex.fileoff = 0;
 		}
+		// generate the runtime code region, if any
+		if (rtexe != null)  {
+			w.skipPage();
+			var exStart = w.endPageAddr();
+			var exSize = pageAlign.alignUp(runtimeCodeSize);
+			w.startAddr = w.startAddr + exSize;
+			rtexe.vmaddr = exStart;
+			rtexe.vmsize = exSize;
+			rtexe.filesize = 0;
+			rtexe.fileoff = 0;
+			rt.recordRuntimeCode(exStart, exSize);
+		}
 		// generate data into buffer
 		w.skipPage();
 		// compute starting location of data
@@ -132,7 +146,7 @@ class X86DarwinTarget extends Target {
 		rt.recordDataEnd(w.endAddr());
 		rt.addHeapPointers(w);
 		ds.filesize = w.end() - ds.fileoff;
-		ds.vmsize = pageAlign.alignUp(ds.filesize + int.view(rt.heapSize));
+		ds.vmsize = pageAlign.alignUp(ds.filesize + int.view(rt.heapSize + rt.shadowStackSize));
 		// patch all addresses in the binary
 		w.patch(backend.patchCodeAddr);
 		// encode header at position 0 now that all addresses and offsets are known
@@ -143,7 +157,7 @@ class X86DarwinTarget extends Target {
 		var fd = System.fileOpen(file, false);
 		if (fd < 0) return prog.ERROR.OutputError(file);
 		// write the entire file from the buffer array
-		System.fileWriteK(fd, w.data, 0, w.end());
+		System.write(fd, w.alias());
 		System.fileClose(fd);
 		// change permissions to make binary executable
 		compiler.makeExecutable(file);

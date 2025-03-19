@@ -1,6 +1,11 @@
 || All optimizations
 =======================
 
+IR-construction time
+    only create phis for variables referenced after a join point
+    run all local misc optimizations per-BB
+  * run loop optimizations immediately after AST translation
+
 local check eliminations
   * shift check
   * divide check
@@ -19,17 +24,19 @@ block flow-sensitive
 
 local misc
   * constant folding
+  * constant fold variant allocations
   * constant propagation
   * dead code elimination
   * dead phi elimination
   * load/store elimination
   * devirtualization
     fold pointer arithmetic
-    boilerplate object copy for large mostly constant arrays
-    strength-reduce {ADT == k} to check only one tag
-    combine adjacent loads/stores
+    boilerplate object copy for large mostly-constant arrays
+    strength-reduce {ADT == ADT} if at least one tag is known
+    combine adjacent byte loads/stores into words
     byteswap recognition
     reorder bounds checks of a[0], a[1], a[2]...
+    ordering of strength-reduction and direct call recording (inlining)
 
 local control flow optimizations
   * branch folding
@@ -121,8 +128,11 @@ inlining
     reduction-guided (pre-compute if branches will fold)
 
 closures
+  * Fold constant closure creation
     optimize argument load order for partial application stubs
     specialize partial applications where a bound argument is a constant function
+    use ICs at closure invocation sites
+    use ICs at closure / partial application sites to pick specializations
 
 whole-program
     dataflow analysis
@@ -130,7 +140,7 @@ whole-program
      * remove dead fields
      * remove write-only fields
      * inline literal fields
-       inline constant fields
+     * inline constant fields
      * devirtualization
        object header elimination
        move field to metaobject
@@ -140,10 +150,12 @@ whole-program
      * fold getfield of immutable fields
        track RMA values for constructor parameters
     object inlining
-    object outlining
+    object outlining (factor out immutable part of objects into cacheable, shareable subobjects)
     code layout
     data layout
     field packing across hierarchy
+    specialize class to field's type
+    pull methods down--specialize to this
     escape analysis
     region inference--stack allocation
     purity analysis
@@ -156,6 +168,7 @@ whole-program
     segregate initial value objects
     vertical object layout
     copy methods down--reduce polymorphism on "this"
+    automatically inline arrays into def fields init'd with literals [x, y, z] that don't escape
     #register for class fields--custom regalloc env for class
 
 backend
@@ -171,6 +184,7 @@ backend
     short branches
   * instruction selection
   * jump tables
+  * graph-coloring register allocation
     return this chaining
 
 instrumentation
@@ -188,8 +202,9 @@ runtime
     inline refmap into object header
 
 lamdbas/partials
+    represent closure environments with variant types instead of classes
     partial application with one bound object parameter
-    specialize partial applications
+    specialize partial applications, maybe with IC
 
 Possible schedule of optimization passes
 VST -> SSA
@@ -271,6 +286,9 @@ Short list:
   * initialized to constant
   * ssa facts for immutable fields
   - ssa facts for mutable fields
+- loop invariant code motion
+- global null check elimination
+- global type check elimination
 - live range splitting
 * bounds check elimination
 - inline trivial methods
@@ -281,9 +299,6 @@ Short list:
 * don't generate empty constructors
 - code layout via callgraph
 - short branches on x86
-- loop invariant code motion
-- global null check elimination
-- global type check elimination
 - optimize explicit bounds checks of >32 bit indexes
 - callee-save registers for allocation stub
   (caller stack frame pre-allocates outgoing-args space and has stackmap for regs)
@@ -381,6 +396,7 @@ Useful Inter-procedural analyses:
 	=> save space on heap
  - Heuristics for specializing methods for some parameters. Partial evaluation
  - Prioritize compiler metrics globally by their impact on program metrics
+ - potentially-foldable branch analysis
 
 
 - Specialization optimizations
@@ -397,4 +413,3 @@ Useful Inter-procedural analyses:
   - specialize partial applications
   - specialize partial applications of constructor (new copy of class)
 
-- Factor out immutable part of objects into cacheable, shareable subobjects

@@ -46,13 +46,19 @@ class Program {
 	}
 	def name() -> string {
 		if (explicitName != null) return explicitName;
-		if (mainRootIndex < 0) return "program";
-		return getMain().asMethod().source.receiver.name();
+		if (mainRootIndex >= 0) return getMain().asMethod().source.receiver.name();
+		for (i < ir.roots.length) {
+			var r = ir.roots[i];
+			if (r == null || !r.spec.isMethod()) continue;
+			var s = r.spec.asMethod().source;
+			if (s != null) return s.receiver.name();
+		}
+		return "program";
 	}
 	def globalType() -> Type {
 		if (global == null) {
 			var name = Arrays.concat(name(), "$global");
-			var decl = VstComponent.new(false, null, Token.new("<generated>", name, 0, 0), null);
+			var decl = VstComponent.new(false, false, null, Token.new("<generated>", name, 0, 0), null);
 			var typeCon = V3Component_TypeCon.new(decl, typeCache);
 			decl.memberMap = Strings.newMap();
 			global = typeCon.create0();
